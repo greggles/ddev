@@ -1,10 +1,10 @@
 package ddevapp
 
 import (
+	"embed"
 	"fmt"
 	"github.com/drud/ddev/pkg/dockerutil"
 	"github.com/drud/ddev/pkg/nodeps"
-
 	"github.com/drud/ddev/pkg/output"
 	"github.com/drud/ddev/pkg/util"
 
@@ -64,54 +64,15 @@ func NewDrupalSettings(app *DdevApp) *DrupalSettings {
 	}
 }
 
-// drupal8SettingsTemplate defines the template that will become a Drupal 8 app's settings.php
-// in the event that one does not already exist.
-const drupal8SettingsTemplate = `<?php
-{{ $config := . }}
-// {{ $config.Signature }}: Automatically generated Drupal settings file.
-if (file_exists($app_root . '/' . $site_path . '/{{ $config.SiteSettingsDdev }}') && getenv('IS_DDEV_PROJECT') == 'true') {
-  include $app_root . '/' . $site_path . '/{{ $config.SiteSettingsDdev }}';
-}
-`
-
-// drupal8SettingsAppendTemplate defines the template that will be appended to
-// a Drupal 8 app's settings.php in the event that one exists.
-const drupal8SettingsAppendTemplate = `{{ $config := . }}
+// settingsIncludeStanza defines the template that will be appended to
+// a project's settings.php in the event that the file already exists.
+const settingsIncludeStanza = `
 // Automatically generated include for settings managed by ddev.
-if (file_exists($app_root . '/' . $site_path . '/{{ $config.SiteSettingsDdev }}') && getenv('IS_DDEV_PROJECT') == 'true') {
-  include $app_root . '/' . $site_path . '/{{ $config.SiteSettingsDdev }}';
-}
-`
-
-// drupal7SettingsTemplate defines the template that will become a Drupal 7
-// app's settings.php in the event that one does not already exist.
-const drupal7SettingsTemplate = `<?php
-{{ $config := . }}
-// {{ $config.Signature }}: Automatically generated Drupal settings file.
-$ddev_settings = dirname(__FILE__) . '/{{ $config.SiteSettingsDdev }}';
-if (is_readable($ddev_settings) && getenv('IS_DDEV_PROJECT') == 'true') {
+$ddev_settings = dirname(__FILE__) . '/settings.ddev.php';
+if (getenv('IS_DDEV_PROJECT') == 'true' && is_readable($ddev_settings)) {
   require $ddev_settings;
 }
 `
-
-// drupal7SettingsAppendTemplate defines the template that will be appended to
-// a Drupal 7 app's settings.php in the event that one exists.
-const drupal7SettingsAppendTemplate = `{{ $config := . }}
-// Automatically generated include for settings managed by ddev.
-$ddev_settings = dirname(__FILE__) . '/{{ $config.SiteSettingsDdev }}';
-if (is_readable($ddev_settings) && getenv('IS_DDEV_PROJECT') == 'true') {
-  require $ddev_settings;
-}
-`
-
-// drupal6SettingsTemplate defines the template that will become a Drupal 6
-// app's settings.php in the event that one does not already exist.
-const drupal6SettingsTemplate = drupal7SettingsTemplate
-
-// drupal7SettingsAppendTemplate defines the template that will be appended to
-// a Drupal 7 app's settings.php in the event that one exists.
-const drupal6SettingsAppendTemplate = drupal7SettingsAppendTemplate
-
 const (
 	drupal8DdevSettingsTemplate = `<?php
 {{ $config := . }}
@@ -119,7 +80,7 @@ const (
  * @file
  * {{ $config.Signature }}: Automatically generated Drupal settings file.
  * ddev manages this file and may delete or overwrite the file unless this
- * comment is removed.
+ * comment is removed.  It is recommended that you leave this file alone.
  */
 
 $host = "{{ $config.DatabaseHost }}";
@@ -130,7 +91,7 @@ $port = {{ $config.DatabasePort }};
 if (empty(getenv('DDEV_PHP_VERSION') && getenv('IS_DDEV_PROJECT') == 'true')) {
   $host = "{{ $config.DockerIP }}";
   $port = {{ $config.DBPublishedPort }};
-} 
+}
 
 $databases['default']['default'] = array(
   'database' => "{{ $config.DatabaseName }}",
@@ -141,11 +102,6 @@ $databases['default']['default'] = array(
   'port' => $port,
   'prefix' => "{{ $config.DatabasePrefix }}",
 );
-
-ini_set('session.gc_probability', 1);
-ini_set('session.gc_divisor', 100);
-ini_set('session.gc_maxlifetime', 200000);
-ini_set('session.cookie_lifetime', 2000000);
 
 $settings['hash_salt'] = '{{ $config.HashSalt }}';
 
@@ -161,13 +117,23 @@ $settings['trusted_host_patterns'] = ['.*'];
 $settings['class_loader_auto_detect'] = FALSE;
 
 // This specifies the default configuration sync directory.
-// $config_directories (pre-Drupal 8.8) and
-// $settings['config_sync_directory'] are supported
-// so it should work on any Drupal 8 or 9 version.
-if (defined('CONFIG_SYNC_DIRECTORY') && empty($config_directories[CONFIG_SYNC_DIRECTORY])) {
-  $config_directories[CONFIG_SYNC_DIRECTORY] = '{{ joinPath $config.SitePath $config.SyncDir }}';
-} else if (empty($settings['config_sync_directory'])) {
-  $settings['config_sync_directory'] = '{{ joinPath $config.SitePath $config.SyncDir }}';
+// For D8 before 8.8.0, we set $config_directories[CONFIG_SYNC_DIRECTORY] if not set
+if (version_compare(Drupal::VERSION, "8.8.0", '<') &&
+  empty($config_directories[CONFIG_SYNC_DIRECTORY])) {
+  $config_directories[CONFIG_SYNC_DIRECTORY] = 'sites/default/files/sync';
+}
+// For D8.8/D8.9, set $settings['config_sync_directory'] if neither
+// $config_directories nor $settings['config_sync_directory is set
+if (version_compare(DRUPAL::VERSION, "8.8.0", '>=') &&
+  version_compare(DRUPAL::VERSION, "9.0.0", '<') &&
+  empty($config_directories[CONFIG_SYNC_DIRECTORY]) &&
+  empty($settings['config_sync_directory'])) {
+  $settings['config_sync_directory'] = 'sites/default/files/sync';
+}
+// For Drupal9, it's always $settings['config_sync_directory']
+if (version_compare(DRUPAL::VERSION, "9.0.0", '>=') &&
+  empty($settings['config_sync_directory'])) {
+  $settings['config_sync_directory'] = 'sites/default/files/sync';
 }
 `
 )
@@ -190,7 +156,7 @@ $port = {{ $config.DatabasePort }};
 if (empty(getenv('DDEV_PHP_VERSION') && getenv('IS_DDEV_PROJECT') == 'true')) {
   $host = "{{ $config.DockerIP }}";
   $port = {{ $config.DBPublishedPort }};
-} 
+}
 
 $databases['default']['default'] = array(
   'database' => "{{ $config.DatabaseName }}",
@@ -201,11 +167,6 @@ $databases['default']['default'] = array(
   'port' => $port,
   'prefix' => "{{ $config.DatabasePrefix }}",
 );
-
-ini_set('session.gc_probability', 1);
-ini_set('session.gc_divisor', 100);
-ini_set('session.gc_maxlifetime', 200000);
-ini_set('session.cookie_lifetime', 2000000);
 
 $drupal_hash_salt = '{{ $config.HashSalt }}';
 `
@@ -228,19 +189,14 @@ $port = {{ $config.DatabasePort }};
 if (empty(getenv('DDEV_PHP_VERSION') && getenv('IS_DDEV_PROJECT') == 'true')) {
   $host = "{{ $config.DockerIP }}";
   $port = {{ $config.DBPublishedPort }};
-} 
+}
 
 $db_url = "{{ $config.DatabaseDriver }}://{{ $config.DatabaseUsername }}:{{ $config.DatabasePassword }}@$host:$port/{{ $config.DatabaseName }}";
-
-ini_set('session.gc_probability', 1);
-ini_set('session.gc_divisor', 100);
-ini_set('session.gc_maxlifetime', 200000);
-ini_set('session.cookie_lifetime', 2000000);
 `
 )
 
 // manageDrupalSettingsFile will direct inspecting and writing of settings.php.
-func manageDrupalSettingsFile(app *DdevApp, drupalConfig *DrupalSettings, settingsTemplate, appendTemplate string) error {
+func manageDrupalSettingsFile(app *DdevApp, drupalConfig *DrupalSettings, appType string) error {
 	// We'll be writing/appending to the settings files and parent directory, make sure we have permissions to do so
 	if err := drupalEnsureWritePerms(app); err != nil {
 		return err
@@ -249,7 +205,7 @@ func manageDrupalSettingsFile(app *DdevApp, drupalConfig *DrupalSettings, settin
 	if !fileutil.FileExists(app.SiteSettingsPath) {
 		output.UserOut.Printf("No %s file exists, creating one", drupalConfig.SiteSettings)
 
-		if err := writeDrupalSettingsFile(drupalConfig, app.SiteSettingsPath, settingsTemplate); err != nil {
+		if err := writeDrupalSettingsFile(app.SiteSettingsPath, appType); err != nil {
 			return fmt.Errorf("failed to write: %v", err)
 		}
 	}
@@ -264,7 +220,7 @@ func manageDrupalSettingsFile(app *DdevApp, drupalConfig *DrupalSettings, settin
 	} else {
 		output.UserOut.Printf("Existing %s file does not include %s, modifying to include ddev settings", drupalConfig.SiteSettings, drupalConfig.SiteSettingsDdev)
 
-		if err := appendIncludeToDrupalSettingsFile(drupalConfig, app.SiteSettingsPath, appendTemplate); err != nil {
+		if err := appendIncludeToDrupalSettingsFile(app.SiteSettingsPath, app.Type); err != nil {
 			return fmt.Errorf("failed to include %s in %s: %v", drupalConfig.SiteSettingsDdev, drupalConfig.SiteSettings, err)
 		}
 	}
@@ -272,10 +228,12 @@ func manageDrupalSettingsFile(app *DdevApp, drupalConfig *DrupalSettings, settin
 	return nil
 }
 
-// writeDrupalSettingsFile creates the app's settings.php or equivalent,
-// which does nothing more than import the ddev-managed settings.ddev.php.
-func writeDrupalSettingsFile(drupalConfig *DrupalSettings, filePath string, versionTemplate string) error {
-	tmpl, err := template.New("settings").Funcs(getTemplateFuncMap()).Parse(versionTemplate)
+//go:embed drupal_settings_assets
+var drupalSettingsAssets embed.FS
+
+// writeDrupalSettingsFile creates the project's settings.php if it doesn't exist
+func writeDrupalSettingsFile(filePath string, appType string) error {
+	content, err := drupalSettingsAssets.ReadFile(path.Join("drupal_settings_assets", appType, "settings.php"))
 	if err != nil {
 		return err
 	}
@@ -291,13 +249,8 @@ func writeDrupalSettingsFile(drupalConfig *DrupalSettings, filePath string, vers
 	}
 
 	// Create file
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+	err = ioutil.WriteFile(filePath, content, 0755)
 	if err != nil {
-		return err
-	}
-	defer util.CheckClose(file)
-
-	if err := tmpl.Execute(file, drupalConfig); err != nil {
 		return err
 	}
 
@@ -312,7 +265,7 @@ func createDrupal7SettingsFile(app *DdevApp) (string, error) {
 	// we may want to do some kind of customization in the future.
 	drupalConfig := NewDrupalSettings(app)
 
-	if err := manageDrupalSettingsFile(app, drupalConfig, drupal7SettingsTemplate, drupal7SettingsAppendTemplate); err != nil {
+	if err := manageDrupalSettingsFile(app, drupalConfig, app.Type); err != nil {
 		return "", err
 	}
 
@@ -331,7 +284,7 @@ func createDrupal8SettingsFile(app *DdevApp) (string, error) {
 	// we may want to do some kind of customization in the future.
 	drupalConfig := NewDrupalSettings(app)
 
-	if err := manageDrupalSettingsFile(app, drupalConfig, drupal8SettingsTemplate, drupal8SettingsAppendTemplate); err != nil {
+	if err := manageDrupalSettingsFile(app, drupalConfig, app.Type); err != nil {
 		return "", err
 	}
 
@@ -340,6 +293,11 @@ func createDrupal8SettingsFile(app *DdevApp) (string, error) {
 	}
 
 	return app.SiteDdevSettingsFile, nil
+}
+
+// createDrupal9SettingsFile is just a wrapper on d8
+func createDrupal9SettingsFile(app *DdevApp) (string, error) {
+	return createDrupal8SettingsFile(app)
 }
 
 // createDrupal6SettingsFile manages creation and modification of settings.php and settings.ddev.php.
@@ -352,7 +310,7 @@ func createDrupal6SettingsFile(app *DdevApp) (string, error) {
 	// mysqli is required in latest D6LTS and works fine in ddev in old D6
 	drupalConfig.DatabaseDriver = "mysqli"
 
-	if err := manageDrupalSettingsFile(app, drupalConfig, drupal6SettingsTemplate, drupal6SettingsAppendTemplate); err != nil {
+	if err := manageDrupalSettingsFile(app, drupalConfig, app.Type); err != nil {
 		return "", err
 	}
 
@@ -401,6 +359,7 @@ func writeDrupal8DdevSettingsFile(settings *DrupalSettings, filePath string) err
 	}
 	defer util.CheckClose(file)
 
+	//nolint: revive
 	if err := tmpl.Execute(file, settings); err != nil {
 		return err
 	}
@@ -515,58 +474,17 @@ func WriteDrushrc(app *DdevApp, filePath string) error {
 
 	uri := app.GetPrimaryURL()
 	drushContents := []byte(`<?php
-/** ` + DdevFileSignature + `: Automatically generated drushrc.php file (for Drush 8)
- ddev manages this file and may delete or overwrite the file unless this comment is removed.
- Remove this comment if you don't want ddev to manage this file.'
+
+/**
+ * @file
+ * ` + DdevFileSignature + `: Automatically generated drushrc.php file (for Drush 8)
+ * ddev manages this file and may delete or overwrite the file unless this comment is removed.
+ * Remove this comment if you don't want ddev to manage this file.
  */
+
 if (getenv('IS_DDEV_PROJECT') == 'true') {
   $options['l'] = "` + uri + `";
 }
-`)
-
-	// Ensure target directory exists and is writable
-	dir := filepath.Dir(filePath)
-	if err := os.Chmod(dir, 0755); os.IsNotExist(err) {
-		if err = os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-
-	err := ioutil.WriteFile(filePath, drushContents, 0666)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// WriteDrushYML writes a drush.yaml to set the default uri
-func WriteDrushYML(app *DdevApp, filePath string) error {
-	if fileutil.FileExists(filePath) {
-
-		// Check if the file is managed by ddev.
-		signatureFound, err := fileutil.FgrepStringInFile(filePath, DdevFileSignature)
-		if err != nil {
-			return err
-		}
-
-		// If the signature wasn't found, warn the user and return.
-		if !signatureFound {
-			util.Warning("%s already exists and is managed by the user.", filepath.Base(filePath))
-			return nil
-		}
-	}
-
-	uri := app.GetPrimaryURL()
-	drushContents := []byte(`
-#` + DdevFileSignature + `: Automatically generated drush.yml file.
-# ddev manages this file and may delete or overwrite the file unless this comment is removed.
-# Remove the comment if you don't want ddev to manage this file.'
-
-options:
-  uri: "` + uri + `"
 `)
 
 	// Ensure target directory exists and is writable
@@ -642,7 +560,17 @@ func isDrupal7App(app *DdevApp) bool {
 
 // isDrupal8App returns true if the app is of type drupal8
 func isDrupal8App(app *DdevApp) bool {
-	if _, err := os.Stat(filepath.Join(app.AppRoot, app.Docroot, "core/scripts/drupal.sh")); err == nil {
+	isD8, err := fileutil.FgrepStringInFile(filepath.Join(app.AppRoot, app.Docroot, "core/lib/Drupal.php"), `const VERSION = '8`)
+	if err == nil && isD8 {
+		return true
+	}
+	return false
+}
+
+// isDrupal9App returns true if the app is of type drupal9
+func isDrupal9App(app *DdevApp) bool {
+	isD9, err := fileutil.FgrepStringInFile(filepath.Join(app.AppRoot, app.Docroot, "core/lib/Drupal.php"), `const VERSION = '9`)
+	if err == nil && isD9 {
 		return true
 	}
 	return false
@@ -663,41 +591,20 @@ func drupal6ConfigOverrideAction(app *DdevApp) error {
 	return nil
 }
 
-// drupal7ConfigOverrideAction overrides php_version for D7,
-// since it is not yet compatible with php7.3
-func drupal7ConfigOverrideAction(app *DdevApp) error {
-	app.PHPVersion = nodeps.PHP72
-	return nil
-}
-
 // drupal8PostStartAction handles default post-start actions for D8 apps, like ensuring
 // useful permissions settings on sites/default.
 func drupal8PostStartAction(app *DdevApp) error {
-	if !app.DisableSettingsManagement {
-		if err := createDrupal8SyncDir(app); err != nil {
-			return err
-		}
+	// Return early because we aren't expected to manage settings.
+	if app.DisableSettingsManagement {
+		return nil
+	}
+	if err := createDrupal8SyncDir(app); err != nil {
+		return err
+	}
 
-		if err := drupalEnsureWritePerms(app); err != nil {
-			return err
-		}
-
-		// Write both drush.yml and drushrc.php for Drupal 8, because we can't know
-		// what version of drush may be in use. drush8 is happy with drushrc.php
-		// drush9 wants drush.yml
-		err := WriteDrushYML(app, filepath.Join(app.AppRoot, "drush", "drush.yml"))
-		if err != nil {
-			util.Warning("Failed to WriteDrushYML: %v", err)
-		}
-
-		err = WriteDrushrc(app, filepath.Join(filepath.Dir(app.SiteSettingsPath), "drushrc.php"))
-		if err != nil {
-			util.Warning("Failed to WriteDrushrc: %v", err)
-		}
-
-		if _, err = app.CreateSettingsFile(); err != nil {
-			return fmt.Errorf("failed to write settings file %s: %v", app.SiteDdevSettingsFile, err)
-		}
+	//nolint: revive
+	if err := drupalEnsureWritePerms(app); err != nil {
+		return err
 	}
 	return nil
 }
@@ -705,6 +612,10 @@ func drupal8PostStartAction(app *DdevApp) error {
 // drupal7PostStartAction handles default post-start actions for D7 apps, like ensuring
 // useful permissions settings on sites/default.
 func drupal7PostStartAction(app *DdevApp) error {
+	// Return early because we aren't expected to manage settings.
+	if app.DisableSettingsManagement {
+		return nil
+	}
 	if err := drupalEnsureWritePerms(app); err != nil {
 		return err
 	}
@@ -714,15 +625,17 @@ func drupal7PostStartAction(app *DdevApp) error {
 		util.Warning("Failed to WriteDrushrc: %v", err)
 	}
 
-	if _, err = app.CreateSettingsFile(); err != nil {
-		return fmt.Errorf("failed to write settings file %s: %v", app.SiteDdevSettingsFile, err)
-	}
 	return nil
 }
 
 // drupal6PostStartAction handles default post-start actions for D6 apps, like ensuring
 // useful permissions settings on sites/default.
 func drupal6PostStartAction(app *DdevApp) error {
+	// Return early because we aren't expected to manage settings.
+	if app.DisableSettingsManagement {
+		return nil
+	}
+
 	if err := drupalEnsureWritePerms(app); err != nil {
 		return err
 	}
@@ -730,9 +643,6 @@ func drupal6PostStartAction(app *DdevApp) error {
 	err := WriteDrushrc(app, filepath.Join(filepath.Dir(app.SiteSettingsPath), "drushrc.php"))
 	if err != nil {
 		util.Warning("Failed to WriteDrushrc: %v", err)
-	}
-	if _, err = app.CreateSettingsFile(); err != nil {
-		return fmt.Errorf("failed to write settings file %s: %v", app.SiteDdevSettingsFile, err)
 	}
 	return nil
 }
@@ -776,7 +686,7 @@ func createDrupal8SyncDir(app *DdevApp) error {
 	// we may want to do some kind of customization in the future.
 	drupalConfig := NewDrupalSettings(app)
 
-	syncDirPath := path.Join(app.GetAppRoot(), app.GetDocroot(), drupalConfig.SyncDir)
+	syncDirPath := path.Join(app.GetAppRoot(), app.GetDocroot(), "sites/default", drupalConfig.SyncDir)
 	if fileutil.FileExists(syncDirPath) {
 		return nil
 	}
@@ -801,16 +711,16 @@ func settingsHasInclude(drupalConfig *DrupalSettings, siteSettingsPath string) (
 
 // appendIncludeToDrupalSettingsFile modifies the settings.php file to include the settings.ddev.php
 // file, which contains ddev-specific configuration.
-func appendIncludeToDrupalSettingsFile(drupalConfig *DrupalSettings, siteSettingsPath string, appendTemplate string) error {
+func appendIncludeToDrupalSettingsFile(siteSettingsPath string, appType string) error {
 	// Check if file is empty
 	contents, err := ioutil.ReadFile(siteSettingsPath)
 	if err != nil {
 		return err
 	}
 
-	// If the file is empty, write the complete settings template and return
+	// If the file is empty, write the complete settings file and return
 	if len(contents) == 0 {
-		return writeDrupalSettingsFile(drupalConfig, siteSettingsPath, appendTemplate)
+		return writeDrupalSettingsFile(siteSettingsPath, appType)
 	}
 
 	// The file is not empty, open it for appending
@@ -820,16 +730,10 @@ func appendIncludeToDrupalSettingsFile(drupalConfig *DrupalSettings, siteSetting
 	}
 	defer util.CheckClose(file)
 
-	tmpl, err := template.New("settings").Funcs(getTemplateFuncMap()).Parse(appendTemplate)
+	_, err = file.Write([]byte(settingsIncludeStanza))
 	if err != nil {
 		return err
 	}
-
-	// Write the template to the file
-	if err := tmpl.Execute(file, drupalConfig); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -870,6 +774,7 @@ func drupalImportFilesAction(app *DdevApp, importPath, extPath string) error {
 		return nil
 	}
 
+	//nolint: revive
 	if err := fileutil.CopyDir(importPath, destPath); err != nil {
 		return err
 	}

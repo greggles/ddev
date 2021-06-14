@@ -1,6 +1,7 @@
 # ddev
 
-[![CircleCI](https://circleci.com/gh/drud/ddev.svg?style=shield)](https://circleci.com/gh/drud/ddev) [![Go Report Card](https://goreportcard.com/badge/github.com/drud/ddev)](https://goreportcard.com/report/github.com/drud/ddev) ![project is maintained](https://img.shields.io/maintenance/yes/2020.svg)
+[![CircleCI](https://circleci.com/gh/drud/ddev.svg?style=shield)](https://circleci.com/gh/drud/ddev) [![Go Report Card](https://goreportcard.com/badge/github.com/drud/ddev)](https://goreportcard.com/report/github.com/drud/ddev) ![project is maintained](https://img.shields.io/maintenance/yes/2021.svg)
+[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/drud/ddev)
 
 ![ddev logo](images/ddev_logo.png)
 
@@ -16,10 +17,13 @@ ddev is an open source tool that makes it simple to get local PHP development en
     * [WordPress Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#wordpress-quickstart)
     * [Drupal 6 and 7 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#drupal-6/7-quickstart)
     * [Drupal 8 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#drupal-8-quickstart)
+    * [Drupal 9 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#drupal-9-quickstart)
     * [Backdrop Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage/#backdrop-quickstart)
     * [TYPO3 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#typo3-quickstart)
     * [Magento 1 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#magento-1-quickstart)
     * [Magento 2 Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#magento-2-quickstart)
+    * [Laravel Quickstart](https://ddev.readthedocs.io/en/stable/users/cli-usage#laravel-quickstart)
+    * [Shopware 6 Quickstart](https://ddev.readthedocs.io/en/latest/users/cli-usage#shopware-6-quickstart)
 
 Having trouble? See our [support options below](#support). You might have trouble if [another local development tool is already using port 80 or 443](https://ddev.readthedocs.io/en/stable/users/troubleshooting/#unable-listen).
 
@@ -35,6 +39,7 @@ Having trouble? See our [support options below](#support). You might have troubl
 * List running projects with `ddev list`.
 * Snapshot databases with `ddev snapshot`.
 * Temporarily share your development website with other using `ddev share`.
+* Trusted HTTPS support
 
 Just running `ddev` will show you all the commands.
 
@@ -54,4 +59,4 @@ We love to hear from our users and help them be successful with ddev. Support op
 ## Additional Information
 
 * **Contributing** See the "How can I contribute" question in the [FAQ](https://ddev.readthedocs.io/en/stable/users/faq/).
-* **Roadmap:** See the [ddev roadmap](https://github.com/drud/ddev/wiki/roadmap). We love your input! Make requests in the [ddev issue queue](https://github.com/drud/ddev/issues).
+* **Roadmap:** See the [ddev roadmap](https://github.com/drud/ddev/wiki/DDEV-Local-Roadmap). We love your input! Make requests in the [ddev issue queue](https://github.com/drud/ddev/issues).

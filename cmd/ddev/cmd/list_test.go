@@ -23,7 +23,7 @@ func TestCmdList(t *testing.T) {
 	// This gratuitous ddev start -a repopulates the ~/.ddev/global_config.yaml
 	// project list, which has been damaged by other tests which use
 	// direct app techniques.
-	_, err := exec.RunCommand(DdevBin, []string{"start", "-a"})
+	_, err := exec.RunCommand(DdevBin, []string{"start", "-a", "-y"})
 	assert.NoError(err)
 
 	// Execute "ddev list" and harvest plain text output.
@@ -94,7 +94,7 @@ func TestCmdList(t *testing.T) {
 	t.Logf("test projects (including inactive) shown with ddev list -j: %v", siteList)
 
 	// Leave firstApp running for other tests
-	out, err = exec.RunCommand(DdevBin, []string{"start", TestSites[0].Name})
+	out, err = exec.RunCommand(DdevBin, []string{"start", "-y", TestSites[0].Name})
 	assert.NoError(err, "error runnning ddev start: %v output=%s", err, out)
 }
 
@@ -105,7 +105,7 @@ func getSitesFromList(t *testing.T, jsonOut string) []interface{} {
 	assert := asrt.New(t)
 
 	logItems, err := unmarshalJSONLogs(jsonOut)
-	assert.NoError(err)
+	require.NoError(t, err)
 	data := logItems[len(logItems)-1]
 	assert.EqualValues(data["level"], "info")
 
@@ -150,11 +150,11 @@ func TestCmdListContinuous(t *testing.T) {
 
 	reader := bufio.NewReader(stdout)
 
-	blob := make([]byte, 8192)
+	blob := make([]byte, 16000)
 	byteCount, err := reader.Read(blob)
 	assert.NoError(err)
 	blob = blob[:byteCount-1]
-	require.True(t, byteCount > 1000)
+	require.True(t, byteCount > 300, "byteCount should have been >300 and was %v", byteCount)
 
 	f, err := unmarshalJSONLogs(string(blob))
 	if err != nil {
@@ -171,11 +171,11 @@ func TestCmdListContinuous(t *testing.T) {
 	time.Sleep(time.Millisecond * 1500)
 
 	// Now read more from the pipe after resetting blob
-	blob = make([]byte, 8192)
+	blob = make([]byte, 16000)
 	byteCount, err = reader.Read(blob)
 	assert.NoError(err)
 	blob = blob[:byteCount-1]
-	require.True(t, byteCount > 1000)
+	require.True(t, byteCount > 300)
 	f, err = unmarshalJSONLogs(string(blob))
 	require.NoError(t, err)
 	if len(f) > 1 {

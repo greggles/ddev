@@ -1,7 +1,10 @@
 #!/bin/bash
-set -e
+set -eu -o pipefail
 
 rm -f /tmp/healthy
+
+export HTTP2=http2
+if [ "${DISABLE_HTTP2:-}" = "true" ]; then HTTP2=""; fi
 
 # Warn if the DOCKER_HOST socket does not exist
 if [[ $DOCKER_HOST = unix://* ]]; then
@@ -24,8 +27,13 @@ if [ "x$RESOLVERS" = "x" ]; then
 fi
 
 # If the user has run the default command and the socket doesn't exist, fail
-if [ "$socketMissing" = 1 -a "$1" = forego -a "$2" = start -a "$3" = '-r' ]; then
+if [ "${socketMissing:-}" = 1 -a "$1" = forego -a "$2" = start -a "$3" = '-r' ]; then
 	exit 1
+fi
+
+if [ ! -z "${USE_LETSENCRYPT:-}" ]; then
+  echo "Lets Encrypt is enabled:"
+  certbot certificates
 fi
 
 mkcert -install

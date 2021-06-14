@@ -2,6 +2,7 @@ package ddevapp
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"github.com/drud/ddev/pkg/globalconfig"
 	"github.com/drud/ddev/pkg/nodeps"
@@ -13,8 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
-
 	"strings"
 
 	osexec "os/exec"
@@ -22,7 +23,6 @@ import (
 	"path"
 	"time"
 
-	"github.com/Masterminds/semver"
 	"github.com/drud/ddev/pkg/appimport"
 	"github.com/drud/ddev/pkg/archive"
 	"github.com/drud/ddev/pkg/ddevhosts"
@@ -41,7 +41,7 @@ var containerWaitTimeout = 61
 // SiteRunning defines the string used to denote running sites.
 const SiteRunning = "running"
 
-// SiteStarting
+// SiteStarting is the string for a project that is starting
 const SiteStarting = "starting"
 
 // SiteStopped defines the string used to denote a site where the containers were not found/do not exist, but the project is there.
@@ -63,7 +63,6 @@ const DdevFileSignature = "#ddev-generated"
 // DdevApp is the struct that represents a ddev app, mostly its config
 // from config.yaml.
 type DdevApp struct {
-	APIVersion                string                `yaml:"APIVersion"`
 	Name                      string                `yaml:"name"`
 	Type                      string                `yaml:"type"`
 	Docroot                   string                `yaml:"docroot"`
@@ -75,36 +74,83 @@ type DdevApp struct {
 	RouterHTTPPort            string                `yaml:"router_http_port"`
 	RouterHTTPSPort           string                `yaml:"router_https_port"`
 	XdebugEnabled             bool                  `yaml:"xdebug_enabled"`
+	NoProjectMount            bool                  `yaml:"no_project_mount,omitempty"`
 	AdditionalHostnames       []string              `yaml:"additional_hostnames"`
 	AdditionalFQDNs           []string              `yaml:"additional_fqdns"`
-	MariaDBVersion            string                `yaml:"mariadb_version,omitempty"`
-	MySQLVersion              string                `yaml:"mysql_version,omitempty"`
-	NFSMountEnabled           bool                  `yaml:"nfs_mount_enabled"`
+	MariaDBVersion            string                `yaml:"mariadb_version"`
+	MySQLVersion              string                `yaml:"mysql_version"`
+	NFSMountEnabled           bool                  `yaml:"nfs_mount_enabled,omitempty"`
+	NFSMountEnabledGlobal     bool                  `yaml:"-"`
+	FailOnHookFail            bool                  `yaml:"fail_on_hook_fail,omitempty"`
+	FailOnHookFailGlobal      bool                  `yaml:"-"`
 	ConfigPath                string                `yaml:"-"`
 	AppRoot                   string                `yaml:"-"`
-	Platform                  string                `yaml:"-"`
-	Provider                  string                `yaml:"provider,omitempty"`
 	DataDir                   string                `yaml:"-"`
 	SiteSettingsPath          string                `yaml:"-"`
 	SiteDdevSettingsFile      string                `yaml:"-"`
-	providerInstance          Provider              `yaml:"-"`
+	ProviderInstance          *Provider             `yaml:"-"`
 	Hooks                     map[string][]YAMLTask `yaml:"hooks,omitempty"`
 	UploadDir                 string                `yaml:"upload_dir,omitempty"`
 	WorkingDir                map[string]string     `yaml:"working_dir,omitempty"`
 	OmitContainers            []string              `yaml:"omit_containers,omitempty,flow"`
+	OmitContainerGlobal       []string              `yaml:"-"`
 	HostDBPort                string                `yaml:"host_db_port,omitempty"`
 	HostWebserverPort         string                `yaml:"host_webserver_port,omitempty"`
 	HostHTTPSPort             string                `yaml:"host_https_port,omitempty"`
 	MailhogPort               string                `yaml:"mailhog_port,omitempty"`
+	MailhogHTTPSPort          string                `yaml:"mailhog_https_port,omitempty"`
 	PHPMyAdminPort            string                `yaml:"phpmyadmin_port,omitempty"`
+	PHPMyAdminHTTPSPort       string                `yaml:"phpmyadmin_https_port,omitempty"`
 	WebImageExtraPackages     []string              `yaml:"webimage_extra_packages,omitempty,flow"`
 	DBImageExtraPackages      []string              `yaml:"dbimage_extra_packages,omitempty,flow"`
 	ProjectTLD                string                `yaml:"project_tld,omitempty"`
 	UseDNSWhenPossible        bool                  `yaml:"use_dns_when_possible"`
 	MkcertEnabled             bool                  `yaml:"-"`
 	NgrokArgs                 string                `yaml:"ngrok_args,omitempty"`
-	Timezone                  string                `yaml:"timezone"`
+	Timezone                  string                `yaml:"timezone,omitempty"`
+	ComposerVersion           string                `yaml:"composer_version"`
 	DisableSettingsManagement bool                  `yaml:"disable_settings_management,omitempty"`
+	WebEnvironment            []string              `yaml:"web_environment"`
+	//Providers                 map[string]*ProviderInfo `yaml:"providers"`
+	ComposeYaml map[string]interface{} `yaml:"-"`
+}
+
+// List provides the functionality for `ddev list`
+// activeOnly if true only shows projects that are currently docker containers
+// continuous if true keeps requesting and outputting continuously
+// continuousSleepTime is the time between reports
+func List(activeOnly bool, continuous bool, continuousSleepTime int) {
+	runTime := util.TimeTrack(time.Now(), "ddev list")
+	defer runTime()
+
+	for {
+		apps, err := GetProjects(activeOnly)
+		if err != nil {
+			util.Failed("failed getting GetProjects: %v", err)
+		}
+		appDescs := make([]map[string]interface{}, 0)
+
+		if len(apps) < 1 {
+			output.UserOut.WithField("raw", appDescs).Println("No ddev projects were found.")
+		} else {
+			table := CreateAppTable()
+			for _, app := range apps {
+				desc, err := app.Describe(true)
+				if err != nil {
+					util.Error("Failed to describe project %s: %v", app.GetName(), err)
+				}
+				appDescs = append(appDescs, desc)
+				RenderAppRow(table, desc)
+			}
+			output.UserOut.WithField("raw", appDescs).Print(table.String() + "\n" + RenderRouterStatus())
+		}
+
+		if !continuous {
+			break
+		}
+
+		time.Sleep(time.Duration(continuousSleepTime) * time.Second)
+	}
 }
 
 // GetType returns the application type as a (lowercase) string
@@ -118,7 +164,7 @@ func (app *DdevApp) Init(basePath string) error {
 	runTime := util.TimeTrack(time.Now(), fmt.Sprintf("app.Init(%s)", basePath))
 	defer runTime()
 
-	newApp, err := NewApp(basePath, true, "")
+	newApp, err := NewApp(basePath, true)
 	if err != nil {
 		return err
 	}
@@ -163,8 +209,8 @@ func (app *DdevApp) FindContainerByType(containerType string) (*docker.APIContai
 }
 
 // Describe returns a map which provides detailed information on services associated with the running site.
-func (app *DdevApp) Describe() (map[string]interface{}, error) {
-	_, _, err := app.ProcessHooks("pre-describe")
+func (app *DdevApp) Describe(short bool) (map[string]interface{}, error) {
+	err := app.ProcessHooks("pre-describe")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to process pre-describe hooks: %v", err)
 	}
@@ -173,21 +219,41 @@ func (app *DdevApp) Describe() (map[string]interface{}, error) {
 	appDesc := make(map[string]interface{})
 
 	appDesc["name"] = app.GetName()
-	appDesc["hostnames"] = app.GetHostnames()
 	appDesc["status"] = app.SiteStatus()
-	appDesc["type"] = app.GetType()
 	appDesc["approot"] = app.GetAppRoot()
 	appDesc["shortroot"] = shortRoot
 	appDesc["httpurl"] = app.GetHTTPURL()
 	appDesc["httpsurl"] = app.GetHTTPSURL()
+	appDesc["primary_url"] = app.GetPrimaryURL()
+	appDesc["type"] = app.GetType()
+
+	// if short is set, we don't need more information, so return what we have.
+	if short {
+		return appDesc, nil
+	}
+	appDesc["hostname"] = app.GetHostname()
+	appDesc["hostnames"] = app.GetHostnames()
+	appDesc["nfs_mount_enabled"] = (app.NFSMountEnabled || app.NFSMountEnabledGlobal)
+	appDesc["fail_on_hook_fail"] = (app.FailOnHookFail || app.FailOnHookFailGlobal)
 	httpURLs, httpsURLs, allURLs := app.GetAllURLs()
 	appDesc["httpURLs"] = httpURLs
 	appDesc["httpsURLs"] = httpsURLs
 	appDesc["urls"] = allURLs
 
+	if app.MySQLVersion != "" {
+		appDesc["database_type"] = "mysql"
+		appDesc["mysql_version"] = app.MySQLVersion
+	} else {
+		appDesc["database_type"] = "mariadb" // default
+		appDesc["mariadb_version"] = app.MariaDBVersion
+		if app.MariaDBVersion == "" {
+			appDesc["mariadb_version"] = nodeps.MariaDBDefaultVersion
+		}
+	}
+
 	// Only show extended status for running sites.
 	if app.SiteStatus() == SiteRunning {
-		if !nodeps.ArrayContainsString(app.OmitContainers, "db") {
+		if !nodeps.ArrayContainsString(app.GetOmittedContainers(), "db") {
 			dbinfo := make(map[string]interface{})
 			dbinfo["username"] = "db"
 			dbinfo["password"] = "db"
@@ -198,15 +264,26 @@ func (app *DdevApp) Describe() (map[string]interface{}, error) {
 			dbinfo["dbPort"] = GetPort("db")
 			util.CheckErr(err)
 			dbinfo["published_port"] = dbPublicPort
-			dbinfo["mariadb_version"] = app.MariaDBVersion
-			dbinfo["mysql_version"] = app.MySQLVersion
+			dbinfo["database_type"] = "mariadb" // default
+			if app.MySQLVersion != "" {
+				dbinfo["database_type"] = "mysql"
+				dbinfo["mysql_version"] = app.MySQLVersion
+			} else {
+				if app.MariaDBVersion != "" {
+					dbinfo["mariadb_version"] = app.MariaDBVersion
+				} else {
+					dbinfo["mariadb_version"] = nodeps.MariaDBDefaultVersion
+				}
+			}
 			appDesc["dbinfo"] = dbinfo
 
-			if !nodeps.ArrayContainsString(app.OmitContainers, "dba") {
+			if !nodeps.ArrayContainsString(app.GetOmittedContainers(), "dba") {
+				appDesc["phpmyadmin_https_url"] = "https://" + app.GetHostname() + ":" + app.PHPMyAdminHTTPSPort
 				appDesc["phpmyadmin_url"] = "http://" + app.GetHostname() + ":" + app.PHPMyAdminPort
 			}
 		}
 
+		appDesc["mailhog_https_url"] = "https://" + app.GetHostname() + ":" + app.MailhogHTTPSPort
 		appDesc["mailhog_url"] = "http://" + app.GetHostname() + ":" + app.MailhogPort
 	}
 
@@ -221,10 +298,57 @@ func (app *DdevApp) Describe() (map[string]interface{}, error) {
 	appDesc["router_https_port"] = app.RouterHTTPSPort
 	appDesc["xdebug_enabled"] = app.XdebugEnabled
 	appDesc["webimg"] = app.WebImage
-	appDesc["dbimg"] = app.WebImage
+	appDesc["dbimg"] = app.GetDBImage()
 	appDesc["dbaimg"] = app.DBAImage
+	appDesc["extra_services"] = map[string]map[string]string{}
 
-	_, _, err = app.ProcessHooks("post-describe")
+	if app.ComposeYaml != nil && len(app.ComposeYaml) > 0 {
+		if services, ok := app.ComposeYaml["services"].(map[interface{}]interface{}); ok {
+			extraServices := appDesc["extra_services"].(map[string]map[string]string)
+			for k, v := range services {
+				serviceName := k.(string)
+
+				// Standard services are handled in other ways; we want custom services only
+				if nodeps.ArrayContainsString([]string{"web", "db", "dba"}, serviceName) {
+					continue
+				}
+
+				var svc map[interface{}]interface{}
+				if svc, ok = v.(map[interface{}]interface{}); !ok {
+					continue
+				}
+
+				extraServices[serviceName] = map[string]string{}
+
+				if env, ok := svc["environment"].(map[interface{}]interface{}); ok {
+					// Extract HTTP_EXPOSE and HTTPS_EXPOSE for additional info
+					for envName, envVal := range env {
+						if envName == "HTTP_EXPOSE" || envName == "HTTPS_EXPOSE" {
+							envValStr := fmt.Sprintf("%s", envVal)
+							portSpecs := strings.Split(envValStr, ",")
+							// There might be more than one exposed UI port, but this only handles the first listed,
+							// most often there's only one.
+							if len(portSpecs) > 0 {
+								// HTTPS portSpecs typically look like <exposed>:<containerPort>, for example - HTTPS_EXPOSE=1359:1358
+								ports := strings.Split(portSpecs[0], ":")
+								extraServices[serviceName][envName.(string)] = ports[0]
+								switch envName {
+								case "HTTP_EXPOSE":
+									extraServices[serviceName]["http_url"] = "http://" + appDesc["hostname"].(string) + ":" + ports[0]
+								case "HTTPS_EXPOSE":
+									extraServices[serviceName]["https_url"] = "https://" + appDesc["hostname"].(string) + ":" + ports[0]
+								}
+							}
+						}
+					}
+				}
+				// TODO: Handle volume names so they can be deleted on ddev destroy
+				// TODO: Show host port access, preferably exposed port. Might require docker inspect?
+			}
+		}
+	}
+
+	err = app.ProcessHooks("post-describe")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to process post-describe hooks: %v", err)
 	}
@@ -243,6 +367,13 @@ func (app *DdevApp) GetPublishedPort(serviceName string) (int, error) {
 
 	publishedPort := dockerutil.GetPublishedPort(privatePort, *container)
 	return publishedPort, nil
+}
+
+// GetOmittedContainers returns full list of global and local omitted containers
+func (app *DdevApp) GetOmittedContainers() []string {
+	omitted := app.OmitContainerGlobal
+	omitted = append(omitted, app.OmitContainers...)
+	return omitted
 }
 
 // GetAppRoot return the full path from root to the app directory
@@ -274,7 +405,7 @@ func (app *DdevApp) GetPhpVersion() string {
 	return v
 }
 
-// GetWebserverType returns the app's webserver type (nginx-fpm/apache-fpm/apache-cgi)
+// GetWebserverType returns the app's webserver type (nginx-fpm/apache-fpm)
 func (app *DdevApp) GetWebserverType() string {
 	v := nodeps.WebserverDefault
 	if app.WebserverType != "" {
@@ -290,14 +421,14 @@ func (app *DdevApp) ImportDB(imPath string, extPath string, progress bool, noDro
 		targetDB = "db"
 	}
 	var extPathPrompt bool
-	dbPath, err := ioutil.TempDir(filepath.Dir(app.ConfigPath), "importdb")
+	dbPath, err := ioutil.TempDir(filepath.Dir(app.ConfigPath), ".importdb")
 	//nolint: errcheck
 	defer os.RemoveAll(dbPath)
 	if err != nil {
 		return err
 	}
 
-	_, _, err = app.ProcessHooks("pre-import-db")
+	err = app.ProcessHooks("pre-import-db")
 	if err != nil {
 		return err
 	}
@@ -367,7 +498,7 @@ func (app *DdevApp) ImportDB(imPath string, extPath string, progress bool, noDro
 		}
 	}
 
-	// Inside the container, the dir for imports will be at /mnt/ddev_config/<tmpdir_name>
+	// Inside the db container, the dir for imports will be at /mnt/ddev_config/<tmpdir_name>
 	insideContainerImportPath := path.Join("/mnt/ddev_config", filepath.Base(dbPath))
 
 	preImportSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s; GRANT ALL ON %s.* TO 'db'@'%%';", targetDB, targetDB)
@@ -375,9 +506,17 @@ func (app *DdevApp) ImportDB(imPath string, extPath string, progress bool, noDro
 		preImportSQL = fmt.Sprintf("DROP DATABASE IF EXISTS %s; ", targetDB) + preImportSQL
 	}
 
-	inContainerCommand := fmt.Sprintf(`mysql -uroot -proot -e "%s" && pv %s/*.*sql | mysql %s`, preImportSQL, insideContainerImportPath, targetDB)
+	// The perl manipulation removes statements like CREATE DATABASE and USE, which
+	// throw off imports. This is a scary manipulation, as it must not match actual content
+	// as has actually happened with https://www.ddev.com/ddev-local/ddev-local-database-management/
+	// and in https://github.com/drud/ddev/issues/2787
+	// The backtick after USE is inserted via fmt.Sprintf argument because it seems there's
+	// no way to escape a backtick in a string literal.
+	inContainerCommand := fmt.Sprintf(`mysql -uroot -proot -e "%s" && pv %s/*.*sql | perl -p -e 's/^(CREATE DATABASE \/\*|USE %s)[^;]*;//' | mysql %s`, preImportSQL, insideContainerImportPath, "`", targetDB)
+
+	// Handle the case where we are reading from stdin
 	if imPath == "" && extPath == "" {
-		inContainerCommand = fmt.Sprintf(`mysql -uroot -proot -e "%s" && mysql %s`, preImportSQL, targetDB)
+		inContainerCommand = fmt.Sprintf(`mysql -uroot -proot -e "%s" && perl -p -e 's/^(CREATE DATABASE \/\*|USE %s)[^;]*;//' | mysql %s`, preImportSQL, "`", targetDB)
 	}
 	_, _, err = app.Exec(&ExecOpts{
 		Service: "db",
@@ -405,7 +544,7 @@ func (app *DdevApp) ImportDB(imPath string, extPath string, progress bool, noDro
 		return fmt.Errorf("failed to clean up %s after import: %v", dbPath, err)
 	}
 
-	_, _, err = app.ProcessHooks("post-import-db")
+	err = app.ProcessHooks("post-import-db")
 	if err != nil {
 		return err
 	}
@@ -466,12 +605,12 @@ func (app *DdevApp) SiteStatus() string {
 	var siteStatus string
 	statuses := map[string]string{"web": ""}
 
-	if !nodeps.ArrayContainsString(app.OmitContainers, "db") {
+	if !nodeps.ArrayContainsString(app.GetOmittedContainers(), "db") {
 		statuses["db"] = ""
 	}
 
 	if !fileutil.FileExists(app.GetAppRoot()) {
-		siteStatus = fmt.Sprintf("%s: %v", SiteDirMissing, app.GetAppRoot())
+		siteStatus = fmt.Sprintf(`%s: %v; Please "ddev stop --unlist %s"`, SiteDirMissing, app.GetAppRoot(), app.Name)
 		return siteStatus
 	}
 
@@ -515,91 +654,11 @@ func (app *DdevApp) SiteStatus() string {
 	return siteStatus
 }
 
-// PullOptions allows for customization of the pull process.
-type PullOptions struct {
-	SkipDb      bool
-	SkipFiles   bool
-	SkipImport  bool
-	Environment string
-}
-
-// Pull performs an import from the a configured provider plugin, if one exists.
-func (app *DdevApp) Pull(provider Provider, opts *PullOptions) error {
-	var err error
-	_, _, err = app.ProcessHooks("pre-pull")
-	if err != nil {
-		return fmt.Errorf("Failed to process pre-pull hooks: %v", err)
-	}
-
-	if app.SiteStatus() != SiteRunning {
-		util.Warning("Project is not currently running. Starting project before performing pull.")
-		err = app.Start()
-		if err != nil {
-			return err
-		}
-	}
-
-	err = provider.Validate()
-	if err != nil {
-		return err
-	}
-
-	if opts.SkipDb {
-		output.UserOut.Println("Skipping database pull.")
-	} else {
-		output.UserOut.Println("Downloading database...")
-		fileLocation, importPath, err := provider.GetBackup("database", opts.Environment)
-		if err != nil {
-			return err
-		}
-
-		output.UserOut.Printf("Database downloaded to: %s", fileLocation)
-
-		if opts.SkipImport {
-			output.UserOut.Println("Skipping database import.")
-		} else {
-			output.UserOut.Println("Importing database...")
-			err = app.ImportDB(fileLocation, importPath, true, false, "db")
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	if opts.SkipFiles {
-		output.UserOut.Println("Skipping files pull.")
-	} else {
-		output.UserOut.Println("Downloading file archive...")
-		fileLocation, importPath, err := provider.GetBackup("files", opts.Environment)
-		if err != nil {
-			return err
-		}
-
-		output.UserOut.Printf("File archive downloaded to: %s", fileLocation)
-
-		if opts.SkipImport {
-			output.UserOut.Println("Skipping files import.")
-		} else {
-			output.UserOut.Println("Importing files...")
-			err = app.ImportFiles(fileLocation, importPath)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	_, _, err = app.ProcessHooks("post-pull")
-	if err != nil {
-		return fmt.Errorf("Failed to process post-pull hooks: %v", err)
-	}
-
-	return nil
-}
-
 // ImportFiles takes a source directory or archive and copies to the uploaded files directory of a given app.
 func (app *DdevApp) ImportFiles(importPath string, extPath string) error {
 	app.DockerEnv()
 
-	if _, _, err := app.ProcessHooks("pre-import-files"); err != nil {
+	if err := app.ProcessHooks("pre-import-files"); err != nil {
 		return err
 	}
 
@@ -607,7 +666,8 @@ func (app *DdevApp) ImportFiles(importPath string, extPath string) error {
 		return err
 	}
 
-	if _, _, err := app.ProcessHooks("post-import-files"); err != nil {
+	//nolint: revive
+	if err := app.ProcessHooks("post-import-files"); err != nil {
 		return err
 	}
 
@@ -615,53 +675,50 @@ func (app *DdevApp) ImportFiles(importPath string, extPath string) error {
 }
 
 // ComposeFiles returns a list of compose files for a project.
-// It has to put the docker-compose.y*l first
+// It has to put the .ddev/docker-compose.*.y*ml first
 // It has to put the docker-compose.override.y*l last
 func (app *DdevApp) ComposeFiles() ([]string, error) {
-	files, err := filepath.Glob(filepath.Join(app.AppConfDir(), "docker-compose*.y*l"))
-	if err != nil || len(files) == 0 {
-		return []string{}, fmt.Errorf("failed to load any docker-compose.*y*l files in %s: err=%v", app.AppConfDir(), err)
+	dir, _ := os.Getwd()
+	// nolint:errcheck
+	defer os.Chdir(dir)
+	err := os.Chdir(app.AppConfDir())
+	if err != nil {
+		return nil, err
+	}
+	files, err := filepath.Glob("docker-compose.*.y*ml")
+	if err != nil {
+		return []string{}, fmt.Errorf("unable to glob docker-compose.*.y*ml in %s: err=%v", app.AppConfDir(), err)
 	}
 
-	mainfiles, err := filepath.Glob(filepath.Join(app.AppConfDir(), "docker-compose.y*l"))
-	// Glob doesn't return many errors, so just CheckErr()
+	mainfile := app.DockerComposeYAMLPath()
+	if !fileutil.FileExists(mainfile) {
+		return nil, fmt.Errorf("failed to find %s", mainfile)
+	}
+
+	overrides, err := filepath.Glob("docker-compose.override.y*ml")
 	util.CheckErr(err)
-	if len(mainfiles) == 0 {
-		return []string{}, fmt.Errorf("failed to find a docker-compose.yml or docker-compose.yaml")
-
-	}
-	if len(mainfiles) > 1 {
-		return []string{}, fmt.Errorf("there are more than one docker-compose.y*l, unable to continue")
-	}
-
-	overrides, err := filepath.Glob(filepath.Join(app.AppConfDir(), "docker-compose.override.y*l"))
-	util.CheckErr(err)
-	if len(overrides) > 1 {
-		return []string{}, fmt.Errorf("there are more than one docker-compose.override.y*l, unable to continue")
-	}
 
 	orderedFiles := make([]string, 1)
 
-	// Make sure the docker-compose.yaml goes first
-	orderedFiles[0] = mainfiles[0]
+	// Make sure the main file goes first
+	orderedFiles[0] = mainfile
 
 	for _, file := range files {
-		// We already have the main docker-compose.yaml, so skip when we hit it.
+		// We already have the main file, and it's not in the list anyway, so skip when we hit it.
 		// We'll add the override later, so skip it.
-		if file == mainfiles[0] || (len(overrides) == 1 && file == overrides[0]) {
+		if len(overrides) == 1 && file == overrides[0] {
 			continue
 		}
-		orderedFiles = append(orderedFiles, file)
+		orderedFiles = append(orderedFiles, app.GetConfigPath(file))
 	}
 	if len(overrides) == 1 {
-		orderedFiles = append(orderedFiles, overrides[0])
+		orderedFiles = append(orderedFiles, app.GetConfigPath(overrides[0]))
 	}
 	return orderedFiles, nil
 }
 
 // ProcessHooks executes Tasks defined in Hooks
-func (app *DdevApp) ProcessHooks(hookName string) (string, string, error) {
-	var stdout, stderr string
+func (app *DdevApp) ProcessHooks(hookName string) error {
 	if cmds := app.Hooks[hookName]; len(cmds) > 0 {
 		output.UserOut.Printf("Executing %s hook...", hookName)
 	}
@@ -669,28 +726,32 @@ func (app *DdevApp) ProcessHooks(hookName string) (string, string, error) {
 	for _, c := range app.Hooks[hookName] {
 		a := NewTask(app, c)
 		if a == nil {
-			return "", "", fmt.Errorf("unable to create task from %v", c)
+			return fmt.Errorf("unable to create task from %v", c)
+		}
+
+		if hookName == "pre-start" {
+			for k := range c {
+				if k == "exec" || k == "composer" {
+					return fmt.Errorf("pre-start hooks cannot contain %v", k)
+				}
+			}
 		}
 
 		output.UserOut.Printf("=== Running task: %s, output below", a.GetDescription())
 
-		taskout, taskerr, err := a.Execute()
-		if taskout != "" {
-			output.UserOut.Println(taskout)
-		}
-		if taskerr != "" {
-			output.UserOut.Errorln(taskerr)
-		}
+		err := a.Execute()
 
 		if err != nil {
-			output.UserOut.Errorf("task failed: %v: %v", a.GetDescription(), err)
+			if app.FailOnHookFail || app.FailOnHookFailGlobal {
+				output.UserOut.Errorf("Task failed: %v: %v", a.GetDescription(), err)
+				return fmt.Errorf("Task failed: %v", err)
+			}
+			output.UserOut.Errorf("Task failed: %v: %v", a.GetDescription(), err)
 			output.UserOut.Warn("A task failure does not mean that ddev failed, but your hook configuration has a command that failed.")
 		}
-		stdout = stdout + taskout
-		stderr = stderr + taskerr
 	}
 
-	return stdout, stderr, nil
+	return nil
 }
 
 // GetDBImage uses the available mariadb or mysql version or provides the default
@@ -734,24 +795,10 @@ func (app *DdevApp) Start() error {
 
 	app.DBImage = app.GetDBImage()
 
-	APIVersion, err := semver.NewVersion(app.APIVersion)
+	err = app.CheckExistingAppInApproot()
 	if err != nil {
 		return err
 	}
-	DdevVersion, err := semver.NewVersion(version.DdevVersion)
-	if err != nil {
-		return err
-	}
-
-	// It returns -1, 0, or 1 if the version smaller, equal, or larger than the other version.
-	compareResult := APIVersion.Compare(DdevVersion)
-
-	if compareResult == -1 {
-		util.Warning("Your %s version is %s, but ddev is (newer) version %s. \nPlease run 'ddev config' to update your config.yaml. \nddev may not operate correctly until you do.", app.ConfigPath, app.APIVersion, version.DdevVersion)
-	} else if compareResult == 1 {
-		util.Warning("Your %s version is %s, but ddev is (older) version %s. \nPlease update ddev, see https://ddev.readthedocs.io/en/stable/.\nddev may not operate correctly until you do.", app.ConfigPath, app.APIVersion, version.DdevVersion)
-	}
-
 	// Make sure that any ports allocated are available.
 	// and of course add to global project list as well
 	err = app.UpdateGlobalProjectList()
@@ -759,21 +806,39 @@ func (app *DdevApp) Start() error {
 		return err
 	}
 
-	_, _, err = app.ProcessHooks("pre-start")
+	err = app.ProcessHooks("pre-start")
 	if err != nil {
 		return err
 	}
 
-	// Pull the main images with full output, since docker-compose up won't
-	// show enough output.
-	for _, imageName := range []string{app.WebImage, app.DBImage, app.DBAImage, version.GetSSHAuthImage(), version.GetRouterImage()} {
-		err = dockerutil.Pull(imageName)
-		if err != nil {
-			return err
-		}
+	// We used to support nginx overrides in .ddev/nginx-site.conf
+	// Warn in that case
+	oldNginxConfig := app.GetConfigPath("nginx-site.conf")
+	if fileutil.FileExists(oldNginxConfig) {
+		util.Warning("An old nginx-site.conf exists at %s. Please move it to ~/.ddev/nginx_full", oldNginxConfig)
 	}
 
-	if !nodeps.ArrayContainsString(app.OmitContainers, "ddev-ssh-agent") {
+	err = app.GenerateWebserverConfig()
+	if err != nil {
+		return err
+	}
+
+	err = app.PullContainerImages()
+	if err != nil {
+		return err
+	}
+
+	// Make sure that important volumes to mount already have correct ownership set
+	// Additional volumes can be added here. This allows us to run a single privileged
+	// container with a single focus of changing ownership, instead of having to use sudo
+	// inside the container
+	uid, _, _ := util.GetContainerUIDGid()
+	_, _, err = dockerutil.RunSimpleContainer(version.GetWebImage(), "", []string{"sh", "-c", fmt.Sprintf("chown -R %s /var/lib/mysql /mnt/ddev-global-cache", uid)}, []string{}, []string{}, []string{app.Name + "-mariadb:/var/lib/mysql", "ddev-global-cache:/mnt/ddev-global-cache"}, "", true, false, nil)
+	if err != nil {
+		return err
+	}
+
+	if !nodeps.ArrayContainsString(app.GetOmittedContainers(), "ddev-ssh-agent") {
 		err = app.EnsureSSHAgentContainer()
 		if err != nil {
 			return err
@@ -782,6 +847,25 @@ func (app *DdevApp) Start() error {
 
 	// Warn the user if there is any custom configuration in use.
 	app.CheckCustomConfig()
+
+	// Warn user if there are deprecated items used in the config
+	app.CheckDeprecations()
+
+	// Copy any global homeadditions content into its mount location
+	globalHomeadditionsPath := filepath.Join(globalconfig.GetGlobalDdevDir(), "homeadditions")
+	if fileutil.IsDirectory(globalHomeadditionsPath) {
+		projectGlobalHomeadditionsPath := app.GetConfigPath(".homeadditions")
+		if fileutil.IsDirectory(projectGlobalHomeadditionsPath) {
+			err = os.RemoveAll(projectGlobalHomeadditionsPath)
+			if err != nil {
+				return err
+			}
+		}
+		err = fileutil.CopyDir(globalHomeadditionsPath, projectGlobalHomeadditionsPath)
+		if err != nil {
+			return err
+		}
+	}
 
 	caRoot := globalconfig.GetCAROOT()
 	if caRoot == "" {
@@ -793,17 +877,29 @@ func (app *DdevApp) Start() error {
 	if router == nil {
 		// Copy ca certs into ddev-global-cache/mkcert
 		if caRoot != "" {
-			output.UserOut.Info("Pushing mkcert rootca certs to ddev-global-cache")
-			_, out, err := dockerutil.RunSimpleContainer("busybox:latest", "", []string{"sh", "-c", "mkdir -p /mnt/ddev-global-cache/composer && mkdir -p /mnt/ddev-global-cache/mkcert && chmod 777 /mnt/ddev-global-cache/* && cp -R /mnt/mkcert /mnt/ddev-global-cache"}, []string{}, []string{}, []string{"ddev-global-cache" + ":/mnt/ddev-global-cache", caRoot + ":/mnt/mkcert"}, "", true)
+			uid, _, _ := util.GetContainerUIDGid()
+			err = dockerutil.CopyToVolume(caRoot, "ddev-global-cache", "mkcert", uid)
 			if err != nil {
-				util.Warning("failed to copy root CA into docker volume: %v, output='%s'", err, out)
+				util.Warning("failed to copy root CA into docker volume ddev-global-cache/mkcert: %v", err)
+			} else {
+				util.Success("Pushed mkcert rootca certs to ddev-global-cache/mkcert")
 			}
-			util.Success("Pushed mkcert rootca certs to ddev-global-cache")
 		}
 	}
 
-	// WriteConfig docker-compose.yaml
-	err = app.WriteDockerComposeConfig()
+	certPath := app.GetConfigPath("custom_certs")
+	if fileutil.FileExists(certPath) {
+		uid, _, _ := util.GetContainerUIDGid()
+		err = dockerutil.CopyToVolume(certPath, "ddev-global-cache", "custom_certs", uid)
+		if err != nil {
+			util.Warning("failed to copy custom certs into docker volume ddev-global-cache/custom_certs: %v", err)
+		} else {
+			util.Success("Copied custom certs in %s to ddev-global-cache/custom_certs", certPath)
+		}
+	}
+
+	// WriteConfig .ddev-docker-compose-*.yaml
+	err = app.WriteDockerComposeYAML()
 	if err != nil {
 		return err
 	}
@@ -813,16 +909,11 @@ func (app *DdevApp) Start() error {
 		return err
 	}
 
-	files, err := app.ComposeFiles()
-	if err != nil {
-		return err
-	}
-
 	// Delete the NFS volumes before we bring up docker-compose.
 	// We don't care if the volume wasn't there
 	_ = dockerutil.RemoveVolume(app.GetNFSMountVolName())
 
-	_, _, err = dockerutil.ComposeCmd(files, "up", "--build", "-d")
+	_, _, err = dockerutil.ComposeCmd([]string{app.DockerComposeFullRenderedYAMLPath()}, "up", "--build", "-d")
 	if err != nil {
 		return err
 	}
@@ -832,14 +923,13 @@ func (app *DdevApp) Start() error {
 		return err
 	}
 
-	requiredContainers := []string{"web"}
-	if !nodeps.ArrayContainsString(app.OmitContainers, "db") {
-		requiredContainers = append(requiredContainers, "db")
-	}
-
-	err = app.Wait(requiredContainers)
+	err = app.WaitByLabels(map[string]string{"com.ddev.site-name": app.GetName()})
 	if err != nil {
 		return err
+	}
+
+	if _, err = app.CreateSettingsFile(); err != nil {
+		return fmt.Errorf("failed to write settings file %s: %v", app.SiteDdevSettingsFile, err)
 	}
 
 	err = app.PostStartAction()
@@ -847,11 +937,103 @@ func (app *DdevApp) Start() error {
 		return err
 	}
 
-	_, _, err = app.ProcessHooks("post-start")
+	err = app.ProcessHooks("post-start")
 	if err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// PullContainerImages pulls the main images with full output, since docker-compose up won't show enough output
+func (app *DdevApp) PullContainerImages() error {
+	containerImages := map[string]string{
+		"db":             app.DBImage,
+		"dba":            app.DBAImage,
+		"ddev-ssh-agent": version.GetSSHAuthImage(),
+		"web":            app.WebImage,
+		"router":         version.GetRouterImage(),
+	}
+
+	omitted := app.GetOmittedContainers()
+	for containerName, imageName := range containerImages {
+		if !nodeps.ArrayContainsString(omitted, containerName) {
+			err := dockerutil.Pull(imageName)
+			if err != nil {
+				return err
+			}
+			if globalconfig.DdevDebug {
+				output.UserOut.Printf("Pulling image for %s: %s", containerName, imageName)
+			}
+		}
+	}
+
+	return nil
+}
+
+// CheckExistingAppInApproot looks to see if we already have a project in this approot with different name
+func (app *DdevApp) CheckExistingAppInApproot() error {
+	pList := globalconfig.GetGlobalProjectList()
+	for name, v := range pList {
+		if app.AppRoot == v.AppRoot && name != app.Name {
+			return fmt.Errorf(`This project root %s already contains a project named %s. You may want to remove the existing project with "ddev stop --unlist %s"`, v.AppRoot, name, name)
+		}
+	}
+	return nil
+}
+
+//go:embed webserver_config_assets
+var webserverConfigAssets embed.FS
+
+// GenerateWebserverConfig generates the default nginx and apache config files
+func (app *DdevApp) GenerateWebserverConfig() error {
+	// Prevent running as root for most cases
+	// We really don't want ~/.ddev to have root ownership, breaks things.
+	if os.Geteuid() == 0 {
+		output.UserOut.Warning("not generating webserver config files because running with root privileges")
+		return nil
+	}
+
+	var items = map[string]string{
+		"nginx":                         app.GetConfigPath(filepath.Join("nginx_full", "nginx-site.conf")),
+		"apache":                        app.GetConfigPath(filepath.Join("apache", "apache-site.conf")),
+		"nginx_second_docroot_example":  app.GetConfigPath(filepath.Join("nginx_full", "seconddocroot.conf.example")),
+		"README.nginx_full.txt":         app.GetConfigPath(filepath.Join("nginx_full", "README.nginx_full.txt")),
+		"README.apache.txt":             app.GetConfigPath(filepath.Join("apache", "README.apache.txt")),
+		"apache_second_docroot_example": app.GetConfigPath(filepath.Join("apache", "seconddocroot.conf.example")),
+	}
+	for t, configPath := range items {
+		err := os.MkdirAll(filepath.Dir(configPath), 0755)
+		if err != nil {
+			return err
+		}
+
+		if fileutil.FileExists(configPath) {
+			sigExists, err := fileutil.FgrepStringInFile(configPath, DdevFileSignature)
+			if err != nil {
+				return err
+			}
+			// If the signature doesn't exist, they have taken over the file, so return
+			if !sigExists {
+				return nil
+			}
+		}
+
+		cfgFile := fmt.Sprintf("%s-site-%s.conf", t, app.Type)
+		c, err := webserverConfigAssets.ReadFile(path.Join("webserver_config_assets", cfgFile))
+		if err != nil {
+			c, err = webserverConfigAssets.ReadFile(path.Join("webserver_config_assets", fmt.Sprintf("%s-site-php.conf", t)))
+			if err != nil {
+				return err
+			}
+		}
+		content := string(c)
+		docroot := path.Join("/var/www/html", app.Docroot)
+		err = fileutil.TemplateStringToFile(content, map[string]interface{}{"Docroot": docroot}, configPath)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -879,10 +1061,22 @@ type ExecOpts struct {
 func (app *DdevApp) Exec(opts *ExecOpts) (string, string, error) {
 	app.DockerEnv()
 
+	runTime := util.TimeTrack(time.Now(), fmt.Sprintf("app.Exec %v", opts))
+	defer runTime()
+
 	if opts.Service == "" {
 		opts.Service = "web"
 	}
-	_, _, err := app.ProcessHooks("pre-exec")
+
+	state, err := dockerutil.GetContainerStateByName(fmt.Sprintf("ddev-%s-%s", app.Name, opts.Service))
+	if err != nil || state != "running" {
+		if state == "doesnotexist" {
+			return "", "", fmt.Errorf("service %s does not exist in project %s (state=%s)", opts.Service, app.Name, state)
+		}
+		return "", "", fmt.Errorf("service %s is not currently running in project %s (state=%s), use `ddev logs -s %s` to see what happened to it", opts.Service, app.Name, state, opts.Service)
+	}
+
+	err = app.ProcessHooks("pre-exec")
 	if err != nil {
 		return "", "", fmt.Errorf("Failed to process pre-exec hooks: %v", err)
 	}
@@ -913,7 +1107,8 @@ func (app *DdevApp) Exec(opts *ExecOpts) (string, string, error) {
 	if !nodeps.ArrayContainsString([]string{"web", "db", "dba"}, opts.Service) {
 		shell = "sh"
 	}
-	exec = append(exec, shell, "-c", opts.Cmd)
+	errcheck := "set -eu"
+	exec = append(exec, shell, "-c", errcheck+` && ( `+opts.Cmd+`)`)
 
 	files, err := app.ComposeFiles()
 	if err != nil {
@@ -933,10 +1128,10 @@ func (app *DdevApp) Exec(opts *ExecOpts) (string, string, error) {
 	if opts.NoCapture || opts.Tty {
 		err = dockerutil.ComposeWithStreams(files, os.Stdin, stdout, stderr, exec...)
 	} else {
-		stdoutResult, stderrResult, err = dockerutil.ComposeCmd(files, exec...)
+		stdoutResult, stderrResult, err = dockerutil.ComposeCmd([]string{app.DockerComposeFullRenderedYAMLPath()}, exec...)
 	}
 
-	_, _, hookErr := app.ProcessHooks("post-exec")
+	hookErr := app.ProcessHooks("post-exec")
 	if hookErr != nil {
 		return stdoutResult, stderrResult, fmt.Errorf("Failed to process post-exec hooks: %v", hookErr)
 	}
@@ -951,6 +1146,11 @@ func (app *DdevApp) ExecWithTty(opts *ExecOpts) error {
 
 	if opts.Service == "" {
 		opts.Service = "web"
+	}
+
+	state, err := dockerutil.GetContainerStateByName(fmt.Sprintf("ddev-%s-%s", app.Name, opts.Service))
+	if err != nil || state != "running" {
+		return fmt.Errorf("service %s is not current running in project %s (state=%s)", opts.Service, app.Name, state)
 	}
 
 	exec := []string{"exec"}
@@ -983,6 +1183,41 @@ func (app *DdevApp) ExecWithTty(opts *ExecOpts) error {
 	}
 
 	return dockerutil.ComposeWithStreams(files, os.Stdin, os.Stdout, os.Stderr, exec...)
+}
+
+func (app *DdevApp) ExecOnHostOrService(service string, cmd string) error {
+	var err error
+	// Handle case on host
+	if service == "host" {
+		cwd, _ := os.Getwd()
+		err = os.Chdir(app.GetAppRoot())
+		if err != nil {
+			return fmt.Errorf("Unable to GetAppRoot: %v", err)
+		}
+		bashPath := "bash"
+		if runtime.GOOS == "windows" {
+			bashPath = util.FindWindowsBashPath()
+			if bashPath == "" {
+				return fmt.Errorf("Unable to find bash.exe on Windows")
+			}
+		}
+
+		args := []string{
+			"-c",
+			cmd,
+		}
+
+		err = exec.RunInteractiveCommand(bashPath, args)
+		_ = os.Chdir(cwd)
+	} else { // handle case in container
+		_, _, err = app.Exec(
+			&ExecOpts{
+				Service: service,
+				Cmd:     cmd,
+				Tty:     isatty.IsTerminal(os.Stdin.Fd()),
+			})
+	}
+	return err
 }
 
 // Logs returns logs for a site's given container.
@@ -1084,7 +1319,7 @@ func (app *DdevApp) DockerEnv() {
 	}
 
 	// DDEV_HOST_DB_PORT is actually used for 2 things.
-	// 1. To specifify via docker-compose.yaml the value of host_db_port config. And it's expected to be empty
+	// 1. To specify via base docker-compose file the value of host_db_port config. And it's expected to be empty
 	//    there if the host_db_port is empty.
 	// 2. To tell custom commands the db port. And it's expected always to be populated for them.
 	dbPort, err := app.GetPublishedPort("db")
@@ -1097,30 +1332,40 @@ func (app *DdevApp) DockerEnv() {
 	}
 
 	envVars := map[string]string{
+		// Without COMPOSE_DOCKER_CLI_BUILD=0, docker-cmpose makes all kinds of mess
+		// of output. BUILDKIT_PROGRESS doesn't help either.
+		"COMPOSE_DOCKER_CLI_BUILD":      "0",
 		"COMPOSE_PROJECT_NAME":          "ddev-" + app.Name,
 		"COMPOSE_CONVERT_WINDOWS_PATHS": "true",
 		"DDEV_SITENAME":                 app.Name,
+		"DDEV_TLD":                      app.ProjectTLD,
 		"DDEV_DBIMAGE":                  app.GetDBImage(),
 		"DDEV_DBAIMAGE":                 app.DBAImage,
+		"DDEV_PROJECT":                  app.Name,
 		"DDEV_WEBIMAGE":                 app.WebImage,
 		"DDEV_APPROOT":                  app.AppRoot,
-		"DDEV_HOST_DB_PORT":             dbPortStr,
-		"DDEV_HOST_WEBSERVER_PORT":      app.HostWebserverPort,
-		"DDEV_HOST_HTTPS_PORT":          app.HostHTTPSPort,
-		"DDEV_PHPMYADMIN_PORT":          app.PHPMyAdminPort,
-		"DDEV_MAILHOG_PORT":             app.MailhogPort,
-		"DDEV_DOCROOT":                  app.Docroot,
-		"DDEV_HOSTNAME":                 app.HostName(),
-		"DDEV_UID":                      uidStr,
-		"DDEV_GID":                      gidStr,
-		"DDEV_PHP_VERSION":              app.PHPVersion,
-		"DDEV_WEBSERVER_TYPE":           app.WebserverType,
-		"DDEV_PROJECT_TYPE":             app.Type,
-		"DDEV_ROUTER_HTTP_PORT":         app.RouterHTTPPort,
-		"DDEV_ROUTER_HTTPS_PORT":        app.RouterHTTPSPort,
-		"DDEV_XDEBUG_ENABLED":           strconv.FormatBool(app.XdebugEnabled),
-		"DDEV_PRIMARY_URL":              app.GetPrimaryURL(),
-		"IS_DDEV_PROJECT":               "true",
+		"DDEV_FILES_DIR":                path.Join("/var/www/html", app.GetDocroot(), app.GetUploadDir()),
+
+		"DDEV_HOST_DB_PORT":          dbPortStr,
+		"DDEV_HOST_WEBSERVER_PORT":   app.HostWebserverPort,
+		"DDEV_HOST_HTTPS_PORT":       app.HostHTTPSPort,
+		"DDEV_PHPMYADMIN_PORT":       app.PHPMyAdminPort,
+		"DDEV_PHPMYADMIN_HTTPS_PORT": app.PHPMyAdminHTTPSPort,
+		"DDEV_MAILHOG_PORT":          app.MailhogPort,
+		"DDEV_MAILHOG_HTTPS_PORT":    app.MailhogHTTPSPort,
+		"DDEV_DOCROOT":               app.Docroot,
+		"DDEV_HOSTNAME":              app.HostName(),
+		"DDEV_UID":                   uidStr,
+		"DDEV_GID":                   gidStr,
+		"DDEV_PHP_VERSION":           app.PHPVersion,
+		"DDEV_WEBSERVER_TYPE":        app.WebserverType,
+		"DDEV_PROJECT_TYPE":          app.Type,
+		"DDEV_ROUTER_HTTP_PORT":      app.RouterHTTPPort,
+		"DDEV_ROUTER_HTTPS_PORT":     app.RouterHTTPSPort,
+		"DDEV_XDEBUG_ENABLED":        strconv.FormatBool(app.XdebugEnabled),
+		"DDEV_PRIMARY_URL":           app.GetPrimaryURL(),
+		"DOCKER_SCAN_SUGGEST":        "false",
+		"IS_DDEV_PROJECT":            "true",
 	}
 
 	// Set the mariadb_local command to empty to prevent docker-compose from complaining normally.
@@ -1159,25 +1404,43 @@ func (app *DdevApp) Pause() error {
 		return fmt.Errorf("no project to stop")
 	}
 
-	_, _, err := app.ProcessHooks("pre-pause")
+	err := app.ProcessHooks("pre-pause")
 	if err != nil {
 		return err
 	}
 
-	files, err := app.ComposeFiles()
-	if err != nil {
+	if _, _, err := dockerutil.ComposeCmd([]string{app.DockerComposeFullRenderedYAMLPath()}, "stop"); err != nil {
 		return err
 	}
-
-	if _, _, err := dockerutil.ComposeCmd(files, "stop"); err != nil {
-		return err
-	}
-	_, _, err = app.ProcessHooks("post-pause")
+	err = app.ProcessHooks("post-pause")
 	if err != nil {
 		return err
 	}
 
 	return StopRouterIfNoContainers()
+}
+
+// WaitForServices waits for all the services in docker-compose to come up
+func (app *DdevApp) WaitForServices() error {
+	requiredContainers := []string{}
+	if services, ok := app.ComposeYaml["services"].(map[interface{}]interface{}); ok {
+		for k := range services {
+			requiredContainers = append(requiredContainers, k.(string))
+		}
+	} else {
+		util.Failed("unable to get required startup services to wait for")
+	}
+	output.UserOut.Printf("Waiting for these services to become ready: %v", requiredContainers)
+
+	labels := map[string]string{
+		"com.ddev.site-name": app.GetName(),
+	}
+	waitTime := containerWaitTimeout
+	_, err := dockerutil.ContainerWait(waitTime, labels)
+	if err != nil {
+		return fmt.Errorf("timed out waiting for containers (%v) to start: err=%v", requiredContainers, err)
+	}
+	return nil
 }
 
 // Wait ensures that the app service containers are healthy.
@@ -1197,7 +1460,19 @@ func (app *DdevApp) Wait(requiredContainers []string) error {
 	return nil
 }
 
-// StartAndWait() is primarily for use in tests.
+// WaitByLabels waits for containers found by list of labels to be
+// ready
+func (app *DdevApp) WaitByLabels(labels map[string]string) error {
+	waitTime := containerWaitTimeout
+	err := dockerutil.ContainersWait(waitTime, labels)
+	if err != nil {
+		// TODO: Improve this error message
+		return fmt.Errorf("container failed to become healthy: err=%v", err)
+	}
+	return nil
+}
+
+// StartAndWait is primarily for use in tests.
 // It does app.Start() but then waits for extra seconds
 // before returning.
 // extraSleep arg in seconds is the time to wait if > 0
@@ -1206,13 +1481,8 @@ func (app *DdevApp) StartAndWait(extraSleep int) error {
 	if err != nil {
 		return err
 	}
-	// Gratuitous wait for docker toolbox or NFS.
-	if nodeps.IsDockerToolbox() || app.NFSMountEnabled {
-		// Docker Toolbox seems not to get the router properly
-		// updated with certs as fast as we expect, use the extraSleep for that.
-		if extraSleep > 0 {
-			time.Sleep(time.Duration(extraSleep) * time.Second)
-		}
+	if extraSleep > 0 {
+		time.Sleep(time.Duration(extraSleep) * time.Second)
 	}
 	return nil
 }
@@ -1244,7 +1514,7 @@ func (app *DdevApp) DetermineSettingsPathLocation() (string, error) {
 // Snapshot forces a mariadb snapshot of the db to be written into .ddev/db_snapshots
 // Returns the dirname of the snapshot and err
 func (app *DdevApp) Snapshot(snapshotName string) (string, error) {
-	_, _, err := app.ProcessHooks("pre-snapshot")
+	err := app.ProcessHooks("pre-snapshot")
 	if err != nil {
 		return "", fmt.Errorf("Failed to process pre-stop hooks: %v", err)
 	}
@@ -1253,6 +1523,15 @@ func (app *DdevApp) Snapshot(snapshotName string) (string, error) {
 		t := time.Now()
 		snapshotName = app.Name + "_" + t.Format("20060102150405")
 	}
+
+	existingSnapshots, err := app.ListSnapshots()
+	if err != nil {
+		return "", err
+	}
+	if nodeps.ArrayContainsString(existingSnapshots, snapshotName) {
+		return "", fmt.Errorf("snapshot %s already exists, please use another snapshot name or clean up snapshots with `ddev snapshot --cleanup`", snapshotName)
+	}
+
 	// Container side has to use path.Join instead of filepath.Join because they are
 	// targeted at the linux filesystem, so won't work with filepath on Windows
 	snapshotDir := path.Join("db_snapshots", snapshotName)
@@ -1282,23 +1561,100 @@ func (app *DdevApp) Snapshot(snapshotName string) (string, error) {
 	}
 
 	util.Success("Created database snapshot %s in %s", snapshotName, hostSnapshotDir)
-	_, _, err = app.ProcessHooks("post-snapshot")
+	err = app.ProcessHooks("post-snapshot")
 	if err != nil {
 		return snapshotName, fmt.Errorf("Failed to process pre-stop hooks: %v", err)
 	}
 	return snapshotName, nil
 }
 
+// DeleteSnapshot removes the snapshot directory inside a project
+func (app *DdevApp) DeleteSnapshot(snapshotName string) error {
+	var err error
+	err = app.ProcessHooks("pre-delete-snapshot")
+	if err != nil {
+		return fmt.Errorf("Failed to process pre-delete-snapshot hooks: %v", err)
+	}
+
+	snapshotDir := path.Join("db_snapshots", snapshotName)
+	hostSnapshotDir := filepath.Join(filepath.Dir(app.ConfigPath), snapshotDir)
+
+	if err = fileutil.PurgeDirectory(hostSnapshotDir); err != nil {
+		return fmt.Errorf("Failed to purge contents of snapshot directory: %v", err)
+	}
+
+	if err = os.Remove(hostSnapshotDir); err != nil {
+		return fmt.Errorf("Failed to delete snapshot directory: %v", err)
+	}
+
+	util.Success("Deleted database snapshot %s in %s", snapshotName, hostSnapshotDir)
+	err = app.ProcessHooks("post-delete-snapshot")
+	if err != nil {
+		return fmt.Errorf("Failed to process post-delete-snapshot hooks: %v", err)
+	}
+
+	return nil
+
+}
+
+// GetLatestSnapshot returns the latest created snapshot of a project
+func (app *DdevApp) GetLatestSnapshot() (string, error) {
+	var snapshots []string
+
+	snapshots, err := app.ListSnapshots()
+	if err != nil {
+		return "", err
+	}
+
+	if len(snapshots) == 0 {
+		return "", fmt.Errorf("no snapshots found")
+	}
+
+	return snapshots[0], nil
+}
+
+// ListSnapshots returns a list of the names of all project snapshots
+func (app *DdevApp) ListSnapshots() ([]string, error) {
+	var err error
+	var snapshots []string
+
+	snapshotDir := filepath.Join(filepath.Dir(app.ConfigPath), "db_snapshots")
+
+	if !fileutil.FileExists(snapshotDir) {
+		return snapshots, nil
+	}
+
+	files, err := ioutil.ReadDir(snapshotDir)
+	if err != nil {
+		return snapshots, err
+	}
+
+	// Sort snapshots by last modification time
+	// we need that to detect the latest snapshot
+	// first snapshot is the latest
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime().After(files[j].ModTime())
+	})
+
+	for _, f := range files {
+		if f.IsDir() {
+			snapshots = append(snapshots, f.Name())
+		}
+	}
+
+	return snapshots, nil
+}
+
 // RestoreSnapshot restores a mariadb snapshot of the db to be loaded
 // The project must be stopped and docker volume removed and recreated for this to work.
 func (app *DdevApp) RestoreSnapshot(snapshotName string) error {
 	var err error
-	_, _, err = app.ProcessHooks("pre-restore-snapshot")
+	err = app.ProcessHooks("pre-restore-snapshot")
 	if err != nil {
 		return fmt.Errorf("Failed to process pre-restore-snapshot hooks: %v", err)
 	}
 
-	currentDBVersion := version.MariaDBDefaultVersion
+	currentDBVersion := nodeps.MariaDBDefaultVersion
 	if app.MariaDBVersion != "" {
 		currentDBVersion = app.MariaDBVersion
 	} else if app.MySQLVersion != "" {
@@ -1329,6 +1685,7 @@ func (app *DdevApp) RestoreSnapshot(snapshotName string) error {
 		return fmt.Errorf("snapshot %s is a DB server %s snapshot and is not compatible with the configured ddev DB server version (%s).  Please restore it using the DB version it was created with, and then you can try upgrading the ddev DB version", snapshotDir, snapshotDBVersion, currentDBVersion)
 	}
 
+	//dockerutil.GetAppContainers(app.Name)
 	if app.SiteStatus() == SiteRunning || app.SiteStatus() == SitePaused {
 		err := app.Stop(false, false)
 		if err != nil {
@@ -1345,20 +1702,40 @@ func (app *DdevApp) RestoreSnapshot(snapshotName string) error {
 	err = os.Unsetenv("DDEV_MARIADB_LOCAL_COMMAND")
 	util.CheckErr(err)
 
-	util.Success("Restored database snapshot: %s", hostSnapshotDir)
-	_, _, err = app.ProcessHooks("post-restore-snapshot")
+	output.UserOut.Printf("Waiting for snapshot restore to complete...\nYou can also follow the restore progress in another terminal window with `ddev logs -s db -f %s`", app.Name)
+	// Now it's up, but we need to find out when it finishes loading.
+	for {
+		// We used to use killall mysqld here, but docker-compose v1.28+
+		// has a bug where it reports that kind of error on exit.
+		// See https://github.com/docker/compose/issues/8169
+		out, _, err := app.Exec(&ExecOpts{
+			Cmd:     "pidof mysqld || true",
+			Service: "db",
+			Tty:     false,
+		})
+		if err != nil {
+			return err
+		}
+		if out != "" {
+			break
+		}
+		time.Sleep(1 * time.Second)
+		fmt.Print(".")
+	}
+	util.Success("\nRestored database snapshot %s", hostSnapshotDir)
+	err = app.ProcessHooks("post-restore-snapshot")
 	if err != nil {
 		return fmt.Errorf("Failed to process post-restore-snapshot hooks: %v", err)
 	}
 	return nil
 }
 
-// Stops and Removes the docker containers for the project in current directory.
+// Stop stops and Removes the docker containers for the project in current directory.
 func (app *DdevApp) Stop(removeData bool, createSnapshot bool) error {
 	app.DockerEnv()
 	var err error
 
-	_, _, err = app.ProcessHooks("pre-stop")
+	err = app.ProcessHooks("pre-stop")
 	if err != nil {
 		return fmt.Errorf("Failed to process pre-stop hooks: %v", err)
 	}
@@ -1405,22 +1782,43 @@ func (app *DdevApp) Stop(removeData bool, createSnapshot bool) error {
 			err = dockerutil.RemoveVolume(volName)
 			if err != nil {
 				util.Warning("could not remove volume %s: %v", volName, err)
+			} else {
+				util.Success("Deleting database. Volume %s for project %s was deleted", volName, app.Name)
 			}
 		}
-		util.Success("Project data/database removed from docker volume for project %s", app.Name)
+		desc, err := app.Describe(false)
+		if err != nil {
+			util.Warning("could not run app.Describe(): %v", err)
+		}
+		for extraService := range desc["extra_services"].(map[string]map[string]string) {
+			// volName default if name: is not specified is ddev-<project>_volume
+			volName := strings.ToLower("ddev-" + app.Name + "_" + extraService)
+			if dockerutil.VolumeExists(volName) {
+				err = dockerutil.RemoveVolume(volName)
+				if err != nil {
+					util.Warning("could not remove volume %s: %v", volName, err)
+				} else {
+					util.Success("Deleting third-party persistent volume %s for service %s...", volName, extraService)
+				}
+			}
+		}
+		dbBuilt := app.GetDBImage() + "-" + app.Name + "-built"
+		_ = dockerutil.RemoveImage(dbBuilt)
+
+		webBuilt := version.GetWebImage() + "-" + app.Name + "-built"
+		_ = dockerutil.RemoveImage(webBuilt)
+		util.Success("Project %s was deleted. Your code and configuration are unchanged.", app.Name)
 	}
 
-	_, _, err = app.ProcessHooks("post-stop")
+	err = app.ProcessHooks("post-stop")
 	if err != nil {
 		return fmt.Errorf("Failed to process post-stop hooks: %v", err)
 	}
 
-	err = StopRouterIfNoContainers()
-
-	return err
+	return nil
 }
 
-// RemoveGlobalProjectInfo() deletes the project from ProjectList
+// RemoveGlobalProjectInfo deletes the project from ProjectList
 func (app *DdevApp) RemoveGlobalProjectInfo() {
 	_ = globalconfig.RemoveProjectInfo(app.Name)
 }
@@ -1464,10 +1862,10 @@ func (app *DdevApp) GetAllURLs() (httpURLs []string, httpsURLs []string, allURLs
 	httpsURLs = append(httpsURLs, app.GetWebContainerDirectHTTPSURL())
 	httpURLs = append(httpURLs, app.GetWebContainerDirectHTTPURL())
 
-	return httpURLs, httpsURLs, append(httpURLs, httpsURLs...)
+	return httpURLs, httpsURLs, append(httpsURLs, httpURLs...)
 }
 
-// GetPrimaryURL() returns the primary URL that can be used, https or http
+// GetPrimaryURL returns the primary URL that can be used, https or http
 func (app *DdevApp) GetPrimaryURL() string {
 	httpURLs, httpsURLs, _ := app.GetAllURLs()
 	urlList := httpsURLs
@@ -1560,10 +1958,12 @@ func (app *DdevApp) AddHostsEntriesIfNeeded() error {
 	}
 
 	for _, name := range app.GetHostnames() {
-		if app.UseDNSWhenPossible {
-			hostIPs, err := net.LookupHost(name)
+		if app.UseDNSWhenPossible && globalconfig.IsInternetActive() {
+			// If they have provided "*.<name>" then look up the suffix
+			checkName := strings.TrimPrefix(name, "*.")
+			hostIPs, err := net.LookupHost(checkName)
+
 			// If we had successful lookup and dockerIP matches
-			// (which won't happen on Docker Toolbox) then don't bother
 			// with adding to hosts file.
 			if err == nil && len(hostIPs) > 0 && hostIPs[0] == dockerIP {
 				continue
@@ -1575,6 +1975,7 @@ func (app *DdevApp) AddHostsEntriesIfNeeded() error {
 		if hosts.Has(dockerIP, name) {
 			continue
 		}
+		util.Warning("The hostname %s is not currently resolvable, trying to add it to the hosts file", name)
 		err = addHostEntry(name, dockerIP)
 		if err != nil {
 			return err
@@ -1584,10 +1985,16 @@ func (app *DdevApp) AddHostsEntriesIfNeeded() error {
 	return nil
 }
 
+// addHostEntry adds an entry to /etc/hosts
+// We would have hoped to use DNS or have found the entry already in hosts
+// But if it's not, try to add one.
 func addHostEntry(name string, ip string) error {
 	_, err := osexec.LookPath("sudo")
-	if (os.Getenv("DRUD_NONINTERACTIVE") != "") || err != nil {
+	if (os.Getenv("DDEV_NONINTERACTIVE") != "") || err != nil {
 		util.Warning("You must manually add the following entry to your hosts file:\n%s %s\nOr with root/administrative privileges execute 'ddev hostname %s %s'", ip, name, name, ip)
+		if nodeps.IsWSL2() {
+			util.Warning("For WSL2, if you use a Windows browser, execute 'sudo ddev hostname %s %s' on Windows", name, ip)
+		}
 		return nil
 	}
 
@@ -1595,6 +2002,9 @@ func addHostEntry(name string, ip string) error {
 	util.CheckErr(err)
 
 	output.UserOut.Printf("ddev needs to add an entry to your hostfile.\nIt will require administrative privileges via the sudo command, so you may be required\nto enter your password for sudo. ddev is about to issue the command:")
+	if nodeps.IsWSL2() {
+		util.Warning("You are on WSL2, so should also manually execute 'sudo ddev hostname %s %s' on Windows if you use a Windows browser.", name, ip)
+	}
 
 	hostnameArgs := []string{ddevFullpath, "hostname", name, ip}
 	command := strings.Join(hostnameArgs, " ")
@@ -1625,7 +2035,7 @@ func (app *DdevApp) RemoveHostsEntries() error {
 		}
 
 		_, err = osexec.LookPath("sudo")
-		if os.Getenv("DRUD_NONINTERACTIVE") != "" || err != nil {
+		if os.Getenv("DDEV_NONINTERACTIVE") != "" || err != nil {
 			util.Warning("You must manually remove the following entry from your hosts file:\n%s %s\nOr with root/administrative privileges execute 'ddev hostname --remove %s %s", dockerIP, name, name, dockerIP)
 			return nil
 		}
@@ -1731,30 +2141,21 @@ func restoreApp(app *DdevApp, siteName string) error {
 }
 
 // GetProvider returns a pointer to the provider instance interface.
-func (app *DdevApp) GetProvider() (Provider, error) {
-	if app.providerInstance != nil {
-		return app.providerInstance, nil
+func (app *DdevApp) GetProvider(providerName string) (*Provider, error) {
+
+	var p Provider
+	var err error
+
+	if providerName != "" && providerName != nodeps.ProviderDefault {
+		p = Provider{
+			ProviderType: providerName,
+			app:          app,
+		}
+		err = p.Init(providerName, app)
 	}
 
-	var provider Provider
-	err := fmt.Errorf("unknown provider type: %s, must be one of %v", app.Provider, nodeps.GetValidProviders())
-
-	switch app.Provider {
-	case nodeps.ProviderPantheon:
-		provider = &PantheonProvider{}
-		err = provider.Init(app)
-	case nodeps.ProviderDrudS3:
-		provider = &DrudS3Provider{}
-		err = provider.Init(app)
-	case nodeps.ProviderDefault:
-		provider = &DefaultProvider{}
-		err = nil
-	default:
-		provider = &DefaultProvider{}
-		// Use the default error from above.
-	}
-	app.providerInstance = provider
-	return app.providerInstance, err
+	app.ProviderInstance = &p
+	return app.ProviderInstance, err
 }
 
 // GetWorkingDir will determine the appropriate working directory for an Exec/ExecWithTty command
@@ -1777,7 +2178,17 @@ func (app *DdevApp) GetWorkingDir(service string, dir string) string {
 	return app.DefaultWorkingDirMap()[service]
 }
 
-// Returns the docker volume name of the nfs mount volume
+// GetNFSMountVolName returns the docker volume name of the nfs mount volume
 func (app *DdevApp) GetNFSMountVolName() string {
 	return strings.ToLower("ddev-" + app.Name + "_nfsmount")
+}
+
+// StartAppIfNotRunning is intended to replace much-duplicated code in the commands.
+func (app *DdevApp) StartAppIfNotRunning() error {
+	var err error
+	if app.SiteStatus() != SiteRunning {
+		err = app.Start()
+	}
+
+	return err
 }

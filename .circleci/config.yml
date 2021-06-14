@@ -2,29 +2,30 @@ version: 2
 jobs:
   build:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
     steps:
     - checkout
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-homebrew-v23
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: NORMAL Circle VM setup - tools, docker, golang
-
-    - run:
-        command: source ~/.bashrc && nvm use 10 && make staticrequired EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
-        name: staticrequired
+        name: NORMAL Circle VM setup
+        no_output_timeout: "40m"
+    - save_cache:
+        key: linux-homebrew-v23
+        paths:
+          - /home/linuxbrew
     - run:
         command: |
-          make -s clean linux darwin windows_install EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+          make linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64 windows_install EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
         name: Build the ddev executables
     - run:
-        command: ./.circleci/generate_artifacts.sh ~/artifacts
+        command: ./.ci-scripts/generate_artifacts.sh ~/artifacts
         name: tar/zip up artifacts and make hashes
         no_output_timeout: "40m"
     - store_artifacts:
@@ -33,43 +34,66 @@ jobs:
     - persist_to_workspace:
         root: ~/
         paths: ddev
-    - save_cache:
-        key: linux-v11
-        paths:
-        - /home/linuxbrew
-        - ~/.ddev/testcache
 
-  lx_nginx_fpm_test:
+  lx_amd64_fpm_test:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
       DDEV_TEST_WEBSERVER_TYPE: nginx-fpm
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
     steps:
+    - checkout
     - attach_workspace:
         at: ~/
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
-    # Run the built-in ddev tests with the executables just built.
+        - linux-homebrew-v23
+    - restore_cache:
+        keys:
+          - linux-testcache-v23
+    - run:
+        command: ls -lR ~/.ddev || true
+        name: Check cache contents
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
-
-        # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
+        name: Circle VM setup
+        no_output_timeout: "40m"
+    - save_cache:
+        key: linux-homebrew-v23
+        paths:
+          - /home/linuxbrew
     - run:
-        command: make -s test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+        command: make -s testpkg TESTARGS='-run "(TestDdevFullSite.*|Test.*Pull)"' EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
         name: ddev tests
         no_output_timeout: "40m"
     - store_test_results:
         path: /tmp/testresults
     - save_cache:
-        key: linux-v11
+        key: linux-testcache-v23
         paths:
-        - /home/linuxbrew
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
+
+  lx_arm64_fpm_test:
+    machine:
+      image: ubuntu-2004:202101-01
+    resource_class: arm.medium
+    working_directory: ~/ddev
+    environment:
+      DDEV_TEST_WEBSERVER_TYPE: nginx-fpm
+      DDEV_NONINTERACTIVE: "true"
+      GOTEST_SHORT: "true"
+    steps:
+      - checkout
+      - run:
+          command: ./.ci-scripts/linux_arm64_setup.sh
+          name: ARM64 VM setup
+          no_output_timeout: "40m"
+      - run:
+          command: make -s test
+          name: ddev tests
+          no_output_timeout: "40m"
 
   mac_nginx_fpm_test:
     macos:
@@ -77,27 +101,27 @@ jobs:
     working_directory: ~/ddev
     environment:
       DDEV_TEST_WEBSERVER_TYPE: nginx-fpm
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
       GOTEST_SHORT: "true"
     steps:
     - attach_workspace:
         at: ~/
     - restore_cache:
         keys:
-        - macos-v16
+        - macos-v23
     # Run the built-in ddev tests with the executables just built.
     - run:
         command: ./.circleci/macos_circle_vm_setup.sh
-        name: macOS Circle VM setup - tools, docker, golang
+        name: macOS Circle VM setup
         # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
     - run:
         command: make -s test
         name: ddev tests
         no_output_timeout: "40m"
     - save_cache:
-        key: macos-v16
+        key: macos-v23
         paths:
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
     - store_test_results:
         path: /tmp/testresults
 
@@ -107,18 +131,18 @@ jobs:
     working_directory: ~/ddev
     environment:
       DDEV_TEST_WEBSERVER_TYPE: apache-fpm
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
       GOTEST_SHORT: "true"
     steps:
     - attach_workspace:
         at: ~/
     - restore_cache:
         keys:
-        - macos-v16
+        - macos-v23
     # Run the built-in ddev tests with the executables just built.
     - run:
         command: ./.circleci/macos_circle_vm_setup.sh
-        name: macOS Circle VM setup - tools, docker, golang
+        name: macOS Circle VM setup
         # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
     - run:
         command: make -s test
@@ -127,9 +151,9 @@ jobs:
     - store_test_results:
         path: /tmp/testresults
     - save_cache:
-        key: macos-v16
+        key: macos-v23
         paths:
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
 
   mac_nfsmount_test:
     macos:
@@ -137,18 +161,18 @@ jobs:
     working_directory: ~/ddev
     environment:
       DDEV_TEST_USE_NFSMOUNT: "true"
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
       GOTEST_SHORT: "true"
     steps:
     - attach_workspace:
         at: ~/
     - restore_cache:
         keys:
-        - macos-v16
+        - macos-v23
     # Run the built-in ddev tests with the executables just built.
     - run:
         command: ./.circleci/macos_circle_vm_setup.sh
-        name: macOS Circle VM setup - tools, docker, golang
+        name: macOS Circle VM setup
     - run:
         command: make -s test
         name: ddev tests
@@ -156,29 +180,31 @@ jobs:
     - store_test_results:
         path: /tmp/testresults
     - save_cache:
-        key: macos-v16
+        key: macos-v23
         paths:
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
 
   lx_apache_fpm_test:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
       DDEV_TEST_WEBSERVER_TYPE: apache-fpm
       # Experiment with only testing TYPO3 with the apache run.
       GOTEST_SHORT: 5
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
     steps:
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-v23
     - attach_workspace:
         at: ~/
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
+        name: Circle VM setup
+        no_output_timeout: "40m"
+
     # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
     # Run the built-in ddev tests with the executables just built.
     - run:
@@ -188,79 +214,51 @@ jobs:
     - store_test_results:
         path: /tmp/testresults
     - save_cache:
-        key: linux-v11
+        key: linux-v23
         paths:
         - /home/linuxbrew
-        - ~/.ddev/testcache
-
-  lx_apache_cgi_test:
-    machine:
-      image: ubuntu-1604:201903-01
-    working_directory: ~/ddev
-    environment:
-      DDEV_TEST_WEBSERVER_TYPE: apache-cgi
-      # Experiment with only testing TYPO3 with the apache run.
-      GOTEST_SHORT: 5
-      DRUD_NONINTERACTIVE: "true"
-    steps:
-    - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
-    - restore_cache:
-        keys:
-        - linux-v11
-    - attach_workspace:
-        at: ~/
-    - run:
-        command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
-    - run:
-        command: make -s test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
-        name: ddev tests
-        no_output_timeout: "120m"
-    - store_test_results:
-        path: /tmp/testresults
-    - save_cache:
-        key: linux-v11
-        paths:
-        - /home/linuxbrew
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
 
   lx_nfsmount_test:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
       DDEV_TEST_USE_NFSMOUNT: true
       # Test only TYPO3 with the apache run.
       GOTEST_SHORT: 5
-      DRUD_NONINTERACTIVE: "true"
+      DDEV_NONINTERACTIVE: "true"
     steps:
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-v23
     - attach_workspace:
         at: ~/
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
+        name: Circle VM setup
+        no_output_timeout: "40m"
 
         # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
     # Run the built-in ddev tests with the executables just built.
     - run:
-        command: make -s test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+        # CircleCI image ubuntu-2004:202101-01 has umask 002, which results in
+        # default perms 700 for new directories, which doesn't seem to work with NFS
+        command: umask u=rwx,g=rwx,o=rx && make -s test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
         name: ddev tests
         no_output_timeout: "120m"
     - store_test_results:
         path: /tmp/testresults
     - save_cache:
-        key: linux-v11
+        key: linux-v23
         paths:
         - /home/linuxbrew
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
 
   staticrequired:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
     steps:
@@ -268,47 +266,88 @@ jobs:
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-v23
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
+        name: Circle VM setup
+        no_output_timeout: "40m"
     - run:
-        command: source ~/.bashrc && nvm use 10 && make staticrequired EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+        command: source ~/.bashrc && make staticrequired EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
         name: staticrequired
 
-  lx_container_test:
+  lx_amd64_container_test:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     environment:
       GOTEST_SHORT: true
+      BUILDKIT_PROGRESS: plain
+      DOCKER_CLI_EXPERIMENTAL: enabled
     steps:
     - checkout
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-v23
     - run:
         command: ./.circleci/linux_circle_vm_setup.sh
-        name: Circle VM setup - tools, docker, golang
+        name: Circle VM setup
+        no_output_timeout: "40m"
+
+    - run:
+        command: ./.circleci/linux_docker_buildx_setup.sh
+        name: Docker buildx setup for multi-arch builds
 
     - run:
         command: |
           . ~/.bashrc
-          for dir in containers/*
-              do pushd $dir
+          for dir in containers/*/
+              do pushd $dir >/dev/null
               echo "--- Build container $dir"
               time make container DOCKER_ARGS=--no-cache EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
               echo "--- Test container $dir"
               time make test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
-              popd
+              popd >/dev/null
           done
         name: linux container test
+
     - save_cache:
-        key: linux-v11
+        key: linux-v23
         paths:
         - /home/linuxbrew
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
+
+  lx_arm64_container_test:
+    machine:
+      image: ubuntu-2004:202101-01
+    resource_class: arm.medium
+    working_directory: ~/ddev
+    environment:
+      GOTEST_SHORT: true
+      BUILDKIT_PROGRESS: plain
+      DOCKER_CLI_EXPERIMENTAL: enabled
+    steps:
+      - checkout
+      - run:
+          command: ./.ci-scripts/linux_arm64_setup.sh
+          name: Circle VM setup
+          no_output_timeout: "40m"
+
+#      - run:
+#          command: ./.circleci/linux_docker_buildx_setup.sh
+#          name: Docker buildx setup for multi-arch builds
+      - run:
+          command: |
+            . ~/.bashrc
+            for dir in containers/*/
+                do pushd $dir >/dev/null
+                echo "--- Build container $dir"
+                time make container DOCKER_ARGS=--no-cache EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+                echo "--- Test container $dir"
+                time make test EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
+                popd >/dev/null
+            done
+          name: linux container test
 
   mac_container_test:
     macos:
@@ -318,7 +357,7 @@ jobs:
     - checkout
     - run:
         command: ./.circleci/macos_circle_vm_setup.sh
-        name: macOS Circle VM setup - tools, docker, golang
+        name: macOS Circle VM setup
 
     - run:
         command: |
@@ -334,71 +373,33 @@ jobs:
 
   artifacts:
     machine:
-      image: ubuntu-1604:201903-01
+      image: ubuntu-2004:202101-01
     working_directory: ~/ddev
     steps:
     - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
     - restore_cache:
         keys:
-        - linux-v11
+        - linux-v23
     - attach_workspace:
         at: ~/
     - run:
-        command: ./.circleci/generate_artifacts.sh ~/artifacts
+        command: ./.ci-scripts/generate_artifacts.sh ~/artifacts
         name: tar/zip up artifacts and make hashes
         no_output_timeout: "40m"
     - save_cache:
-        key: linux-v11
+        key: linux-v23
         paths:
         - /home/linuxbrew
-        - ~/.ddev/testcache
+        - /home/circleci/.ddev/testcache
 
     - store_artifacts:
         path: ~/artifacts
         name: Artifact storage
 
-  # 'tag_build' automatically builds a tag .
-#  tag_build:
-#    machine:
-#      image: ubuntu-1604:201903-01
-#    working_directory: ~/ddev
-#    environment:
-#      DDEV_DEBUG: "true"
-#    steps:
-#      - checkout
-#      - run: sudo mkdir /home/linuxbrew && sudo chown $(id -u) /home/linuxbrew
-#      - restore_cache:
-#          keys:
-#          - linux-v11
-#      - run:
-#          command: ./.circleci/linux_circle_vm_setup.sh
-#          name: TAG BUILD Circle VM setup - tools, docker, golang
-#      - save_cache:
-#          key: linux-v11
-#          paths:
-#          - /home/linuxbrew
-#          - ~/.ddev/testcache
-#
-#      # Now build using the regular ddev-only technique - this results in a fully clean set of executables.
-#      - run:
-#          command: make -s clean linux darwin windows_install EXTRA_PATH=/home/linuxbrew/.linuxbrew/bin
-#          name: Build the ddev executables
-#
-#      # We only build the xz version of the docker images on tag build.
-#      - run:
-#          # Do not build the docker tarballs at simple tag build time
-#          command: ./.circleci/generate_artifacts.sh ~/artifacts false false
-#          name: tar/zip up artifacts and make hashes
-#          no_output_timeout: "40m"
-#
-#      - store_artifacts:
-#          path: ~/artifacts
-#          name: Artifact storage
 
-  # 'tag_build' is used to push a full release
   release_build:
     macos:
-      xcode: "11.3.1"
+      xcode: "12.4.0"
     working_directory: ~/ddev
     environment:
       DDEV_DEBUG: "true"
@@ -406,34 +407,31 @@ jobs:
     - checkout
     - run:
         command: ./.circleci/macos_circle_vm_setup.sh
-        name: TAG BUILD (macOS) Circle VM setup
-
+        name: RELEASE BUILD (macOS) Circle VM setup
+    - run: echo "version=$(make version)  CIRCLE_TAG=${CIRCLE_TAG}"
     - run:
-        command: make -s clean linux windows_install chocolatey
-
+        command: make -s linux_amd64 linux_arm64 windows_amd64 windows_install chocolatey
     - run:
-        command: make -s darwin_notarized
+        command: make -s darwin_amd64_notarized darwin_arm64_notarized
         no_output_timeout: 30m
 
     # We only build the xz version of the docker images on tag build.
     - run:
-        command: ./.circleci/generate_artifacts.sh ~/artifacts
+        command: ./.ci-scripts/generate_artifacts.sh ~/artifacts
         name: tar/zip up artifacts and make hashes
         no_output_timeout: "40m"
 
     - run:
         command: |
           if [ ! -z "${DDEV_GITHUB_TOKEN}" ]; then
-            version=$(make version)
-            version="${version#*:}"  # Remove the VERSION: in front of make version
-            echo "DDEV_GITHUB_TOKEN provided, pushing release ${version}"
+            echo "DDEV_GITHUB_TOKEN provided, pushing release ${CIRCLE_TAG}"
             ghr \
             -prerelease \
             -r $CIRCLE_PROJECT_REPONAME \
             -u $CIRCLE_PROJECT_USERNAME \
             -b "$(cat ./.github/RELEASE_NOTES_TEMPLATE.md)" \
             -t $DDEV_GITHUB_TOKEN \
-            "${version}" ~/artifacts
+            "${CIRCLE_TAG}" ~/artifacts
           else
             echo "DDEV_GITHUB_TOKEN not provided, not pushing release $CIRCLE_TAG"
           fi
@@ -441,32 +439,58 @@ jobs:
     - store_artifacts:
         path: ~/artifacts
         name: Artifact storage
-    # When fixed, this will have to be done after push to github, so it can use
-    # the real github release artifact.
-#    - run:
-#        name: Upload chocolatey windows release
-#        command: |
-#          if [ ! -z "${CHOCOLATEY_API_KEY:-}" ]; then
-#            echo "Pushing release to chocolatey..."
-#            pushd .gotmp/bin/windows_amd64/chocolatey
-#            docker run --rm -v $PWD:/tmp/chocolatey -w /tmp/chocolatey linuturk/mono-choco push -s https://push.chocolatey.org/ --api-key "${CHOCOLATEY_API_KEY}"
-#            popd
-#          else
-#            echo "NOT pushing release to chocolatey because no CHOCOLATEY_API_KEY was provided"
-#          fi
-
+    - run:
+        name: "Bump homebrew edge release"
+        command: ".ci-scripts/bump_homebrew.sh ${HOMEBREW_EDGE_REPOSITORY} ddev ${CIRCLE_TAG} ~/artifacts"
+    - run:
+        name: "Bump homebrew main release if necessary"
+        command: |
+          if [ ${CIRCLE_TAG%-*} = ${CIRCLE_TAG} ]; then
+            .ci-scripts/bump_homebrew.sh ${HOMEBREW_STABLE_REPOSITORY} ddev ${CIRCLE_TAG} ~/artifacts
+          else
+            echo "Skipping homebrew main release because ${CIRCLE_TAG} is an edge/prerelease"
+          fi
+    - run:
+        name: Push AUR ddev-bin if necessary
+        command: |
+            if [ ! -z "${AUR_SSH_PRIVATE_KEY}" ] && [ "${CIRCLE_TAG%-*}" = "${CIRCLE_TAG}" ] ; then
+              .ci-scripts/bump_aur.sh ddev-bin ${CIRCLE_TAG} ~/artifacts
+            else
+              echo "Skipping AUR ddev-bin push"
+            fi
+    - run:
+        name: Push AUR ddev-edge-bin
+        command: |
+          if [ ! -z "${AUR_SSH_PRIVATE_KEY}" ] ; then
+            .ci-scripts/bump_aur.sh ddev-edge-bin ${CIRCLE_TAG} ~/artifacts
+          else
+            echo "Skipping AUR ddev-edge-bin push"
+          fi
+    - run:
+        name: Upload chocolatey windows release
+        command: |
+          if [ ! -z "${CHOCOLATEY_API_KEY:-}" ]; then
+            echo "Pushing release to chocolatey..."
+            pushd .gotmp/bin/windows_amd64/chocolatey
+            docker run --rm -v $PWD:/tmp/chocolatey -w /tmp/chocolatey linuturk/mono-choco push -s https://push.chocolatey.org/ --api-key "${CHOCOLATEY_API_KEY}"
+            popd
+          else
+            echo "NOT pushing release to chocolatey because no CHOCOLATEY_API_KEY was provided"
+          fi
 
 workflows:
   version: 2
   normal_build_and_test:
     jobs:
-    - build
+#    - build
 #    - mac_container_test
-    - lx_container_test
+#    - lx_amd64_container_test
 #    - staticrequired
-    - lx_nginx_fpm_test:
-        requires:
-        - build
+    - lx_amd64_fpm_test
+    - lx_arm64_fpm_test
+#    - lx_arm64_container_test
+#        requires:
+#        - build
 #    - mac_nginx_fpm_test:
 #        requires:
 #        - build
@@ -476,15 +500,15 @@ workflows:
 #    - mac_nfsmount_test:
 #        requires:
 #        - build
-    - lx_apache_fpm_test:
-        requires:
-        - build
-    - lx_apache_cgi_test:
-        requires:
-        - build
-    - lx_nfsmount_test:
-        requires:
-        - build
+#    - lx_apache_fpm_test:
+#        requires:
+#        - build
+#    - lx_apache_cgi_test:
+#        requires:
+#        - build
+#    - lx_nfsmount_test:
+#        requires:
+#        - build
 #    - artifacts:
 #        requires:
 #        - build
@@ -499,19 +523,18 @@ workflows:
                 - master
                 - "pull/[0-9]+"
     jobs:
-    - build
-    - lx_container_test
-    - lx_nginx_fpm_test:
-        requires:
-        - build
+    - lx_amd64_container_test
+#    - lx_arm64_container_test
+#    - lx_amd64_fpm_test
+    - lx_arm64_fpm_test
 
-  release_build:
-    jobs:
-      - release_build:
-          context: org-global
-          filters:
-            tags:
-              only:
-                - "/.*/"
-            branches:
-              ignore: /.*/
+#  release_build:
+#    jobs:
+#      - release_build:
+#          context: ddev-local
+#          filters:
+#            tags:
+#              only:
+#                - "/.*/"
+#            branches:
+#              ignore: /.*/

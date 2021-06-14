@@ -2,6 +2,7 @@ package version
 
 import (
 	"fmt"
+	"github.com/drud/ddev/pkg/globalconfig"
 	"github.com/drud/ddev/pkg/nodeps"
 	"github.com/fsouza/go-dockerclient"
 	"os/exec"
@@ -9,20 +10,10 @@ import (
 	"strings"
 )
 
-// MariaDBDefaultVersion is the default version we use in the db container
-const MariaDBDefaultVersion = "10.2"
-
-// VERSION is supplied with the git committish this is built from
-var VERSION = ""
-
 // IMPORTANT: These versions are overridden by version ldflags specifications VERSION_VARIABLES in the Makefile
 
 // DdevVersion is the current version of ddev, by default the git committish (should be current git tag)
 var DdevVersion = "v0.0.0-overridden-by-make" // Note that this is overridden by make
-
-// SentryDSN is the ddev-specific key for the Sentry service.
-// It is compiled in using link-time variables
-var SentryDSN = ""
 
 // SegmentKey is the ddev-specific key for Segment service
 // Compiled with link-time variables
@@ -49,16 +40,16 @@ var DockerComposeFileFormatVersion = "3.6"
 var WebImg = "drud/ddev-webserver"
 
 // WebTag defines the default web image tag for drud dev
-var WebTag = "v1.13.0" // Note that this can be overridden by make
+var WebTag = "v1.17.4" // Note that this can be overridden by make
 
 // DBImg defines the default db image used for applications.
 var DBImg = "drud/ddev-dbserver"
 
 // BaseDBTag is the main tag, DBTag is constructed from it
-var BaseDBTag = "v1.13.0"
+var BaseDBTag = "v1.17.3"
 
 // DBAImg defines the default phpmyadmin image tag used for applications.
-var DBAImg = "phpmyadmin/phpmyadmin"
+var DBAImg = "phpmyadmin"
 
 // DBATag defines the default phpmyadmin image tag used for applications.
 var DBATag = "5" // Note that this can be overridden by make
@@ -67,14 +58,13 @@ var DBATag = "5" // Note that this can be overridden by make
 var RouterImage = "drud/ddev-router"
 
 // RouterTag defines the tag used for the router.
-var RouterTag = "v1.13.0" // Note that this can be overridden by make
+var RouterTag = "v1.17.3" // Note that this can be overridden by make
 
+// SSHAuthImage is image for agent
 var SSHAuthImage = "drud/ddev-ssh-agent"
 
-var SSHAuthTag = "v1.13.0"
-
-// COMMIT is the actual committish, supplied by make
-var COMMIT = "COMMIT should be overridden"
+// SSHAuthTag is ssh-agent auth tag
+var SSHAuthTag = "v1.17.0"
 
 // BUILDINFO is information with date and context, supplied by make
 var BUILDINFO = "BUILDINFO should have new info"
@@ -96,9 +86,9 @@ func GetVersionInfo() map[string]string {
 	versionInfo["dba"] = GetDBAImage()
 	versionInfo["router"] = RouterImage + ":" + RouterTag
 	versionInfo["ddev-ssh-agent"] = SSHAuthImage + ":" + SSHAuthTag
-	versionInfo["commit"] = COMMIT
 	versionInfo["build info"] = BUILDINFO
 	versionInfo["os"] = runtime.GOOS
+	versionInfo["architecture"] = runtime.GOARCH
 	if versionInfo["docker"], err = GetDockerVersion(); err != nil {
 		versionInfo["docker"] = fmt.Sprintf("failed to GetDockerVersion(): %v", err)
 	}
@@ -106,11 +96,7 @@ func GetVersionInfo() map[string]string {
 		versionInfo["docker-compose"] = fmt.Sprintf("failed to GetDockerComposeVersion(): %v", err)
 	}
 	if runtime.GOOS == "windows" {
-		if nodeps.IsDockerToolbox() {
-			versionInfo["docker type"] = "Docker Toolbox"
-		} else {
-			versionInfo["docker type"] = "Docker Desktop For Windows"
-		}
+		versionInfo["docker type"] = "Docker Desktop For Windows"
 	}
 
 	return versionInfo
@@ -118,12 +104,16 @@ func GetVersionInfo() map[string]string {
 
 // GetWebImage returns the correctly formatted web image:tag reference
 func GetWebImage() string {
-	return fmt.Sprintf("%s:%s", WebImg, WebTag)
+	fullWebImg := WebImg
+	if globalconfig.DdevGlobalConfig.UseHardenedImages {
+		fullWebImg = fullWebImg + "-prod"
+	}
+	return fmt.Sprintf("%s:%s", fullWebImg, WebTag)
 }
 
 // GetDBImage returns the correctly formatted db image:tag reference
 func GetDBImage(dbType string, dbVersion ...string) string {
-	v := MariaDBDefaultVersion
+	v := nodeps.MariaDBDefaultVersion
 	if len(dbVersion) > 0 {
 		v = dbVersion[0]
 	}

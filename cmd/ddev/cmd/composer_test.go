@@ -4,7 +4,6 @@ import (
 	"github.com/drud/ddev/pkg/ddevapp"
 	"github.com/drud/ddev/pkg/exec"
 	"github.com/drud/ddev/pkg/fileutil"
-	"github.com/drud/ddev/pkg/nodeps"
 	"github.com/drud/ddev/pkg/testcommon"
 	asrt "github.com/stretchr/testify/assert"
 	"os"
@@ -37,7 +36,7 @@ func TestComposerCmd(t *testing.T) {
 	assert.Contains(out, "Available commands:")
 
 	// Get an app just so we can do waits
-	app, err := ddevapp.NewApp(tmpDir, true, "")
+	app, err := ddevapp.NewApp(tmpDir, true)
 	assert.NoError(err)
 	//nolint: errcheck
 	defer app.Stop(true, false)
@@ -46,7 +45,7 @@ func TestComposerCmd(t *testing.T) {
 	// These two often fail on Windows with NFS
 	// It appears to be something about composer itself?
 
-	if !(runtime.GOOS == "windows" && app.NFSMountEnabled) {
+	if !(runtime.GOOS == "windows" && (app.NFSMountEnabled || app.NFSMountEnabledGlobal)) {
 		// ddev composer create --prefer-dist --no-interaction --no-dev psr/log:1.1.0
 		args = []string{"composer", "create", "--prefer-dist", "--no-interaction", "--no-dev", "psr/log:1.1.0"}
 		out, err = exec.RunCommand(DdevBin, args)
@@ -71,11 +70,6 @@ func TestComposerCmd(t *testing.T) {
 	assert.Contains(out, "Generating autoload files")
 	assert.FileExists(filepath.Join(tmpDir, "vendor/sebastian/version/composer.json"))
 	// Test a composer remove
-	if nodeps.IsDockerToolbox() {
-		// On docker toolbox, git objects are read-only, causing the composer remove to fail.
-		_, err = exec.RunCommand(DdevBin, []string{"exec", "chmod", "-R", "u+w", "//var/www/html/"})
-		assert.NoError(err)
-	}
 	args = []string{"composer", "remove", "sebastian/version"}
 	out, err = exec.RunCommand(DdevBin, args)
 	assert.NoError(err, "failed to run %v: err=%v, output=\n=====\n%s\n=====\n", args, err, out)

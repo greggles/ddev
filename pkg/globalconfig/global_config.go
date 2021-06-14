@@ -1,9 +1,10 @@
 package globalconfig
 
 import (
+	"context"
 	"fmt"
 	"github.com/drud/ddev/pkg/nodeps"
-	"github.com/drud/ddev/pkg/version"
+	"github.com/drud/ddev/pkg/output"
 	"github.com/mitchellh/go-homedir"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -11,10 +12,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DdevGlobalConfigName is the name of the global config file.
@@ -36,40 +37,43 @@ type ProjectInfo struct {
 
 // GlobalConfig is the struct defining ddev's global config
 type GlobalConfig struct {
-	APIVersion              string                  `yaml:"APIVersion"`
-	OmitContainers          []string                `yaml:"omit_containers,flow"`
-	InstrumentationOptIn    bool                    `yaml:"instrumentation_opt_in"`
-	RouterBindAllInterfaces bool                    `yaml:"router_bind_all_interfaces"`
-	DeveloperMode           bool                    `yaml:"developer_mode,omitempty"`
-	InstrumentationUser     string                  `yaml:"instrumentation_user,omitempty"`
-	LastStartedVersion      string                  `yaml:"last_started_version"`
-	MkcertCARoot            string                  `yaml:"mkcert_caroot"`
-	ProjectList             map[string]*ProjectInfo `yaml:"project_info"`
+	OmitContainersGlobal     []string `yaml:"omit_containers,flow"`
+	NFSMountEnabledGlobal    bool     `yaml:"nfs_mount_enabled"`
+	InstrumentationOptIn     bool     `yaml:"instrumentation_opt_in"`
+	RouterBindAllInterfaces  bool     `yaml:"router_bind_all_interfaces"`
+	InternetDetectionTimeout int64    `yaml:"internet_detection_timeout_ms"`
+	DeveloperMode            bool     `yaml:"developer_mode,omitempty"`
+	InstrumentationUser      string   `yaml:"instrumentation_user,omitempty"`
+	LastStartedVersion       string   `yaml:"last_started_version"`
+	MkcertCARoot             string   `yaml:"mkcert_caroot"`
+	UseHardenedImages        bool     `yaml:"use_hardened_images"`
+	UseLetsEncrypt           bool     `yaml:"use_letsencrypt"`
+	LetsEncryptEmail         string   `yaml:"letsencrypt_email"`
+	AutoRestartContainers    bool     `yaml:"auto_restart_containers"`
+	FailOnHookFailGlobal     bool     `yaml:"fail_on_hook_fail"`
+	WebEnvironment           []string `yaml:"web_environment"`
+	DisableHTTP2             bool     `yaml:"disable_http2"`
+
+	ProjectList map[string]*ProjectInfo `yaml:"project_info"`
 }
 
-// GetGlobalConfigPath() gets the path to global config file
+// GetGlobalConfigPath gets the path to global config file
 func GetGlobalConfigPath() string {
 	return filepath.Join(GetGlobalDdevDir(), DdevGlobalConfigName)
 }
 
 // ValidateGlobalConfig validates global config
 func ValidateGlobalConfig() error {
-	if !IsValidOmitContainers(DdevGlobalConfig.OmitContainers) {
-		return fmt.Errorf("Invalid omit_containers: %s, must contain only %s", strings.Join(DdevGlobalConfig.OmitContainers, ","), strings.Join(GetValidOmitContainers(), ",")).(InvalidOmitContainers)
+	if !IsValidOmitContainers(DdevGlobalConfig.OmitContainersGlobal) {
+		return fmt.Errorf("Invalid omit_containers: %s, must contain only %s", strings.Join(DdevGlobalConfig.OmitContainersGlobal, ","), strings.Join(GetValidOmitContainers(), ",")).(InvalidOmitContainers)
 	}
 
 	return nil
 }
 
-// ReadGlobalConfig() reads the global config file into DdevGlobalConfig
+// ReadGlobalConfig reads the global config file into DdevGlobalConfig
 func ReadGlobalConfig() error {
 	globalConfigFile := GetGlobalConfigPath()
-	// This is added just so we can see it in global; not checked.
-	DdevGlobalConfig.APIVersion = version.DdevVersion
-	// Make sure that LastStartedVersion always has a valid value
-	if DdevGlobalConfig.LastStartedVersion == "" {
-		DdevGlobalConfig.LastStartedVersion = version.DdevVersion
-	}
 
 	// Can't use fileutil.FileExists() here because of import cycle.
 	if _, err := os.Stat(globalConfigFile); err != nil {
@@ -95,7 +99,7 @@ func ReadGlobalConfig() error {
 	}
 
 	// ReadConfig config values from file.
-	DdevGlobalConfig = GlobalConfig{}
+	DdevGlobalConfig = GlobalConfig{InternetDetectionTimeout: nodeps.InternetDetectionTimeoutDefault}
 	err = yaml.Unmarshal(source, &DdevGlobalConfig)
 	if err != nil {
 		return err
@@ -103,8 +107,20 @@ func ReadGlobalConfig() error {
 	if DdevGlobalConfig.ProjectList == nil {
 		DdevGlobalConfig.ProjectList = map[string]*ProjectInfo{}
 	}
-	if DdevGlobalConfig.MkcertCARoot == "" {
+	// Set/read the CAROOT if it's unset or different from $CAROOT (perhaps $CAROOT changed)
+	caRootEnv := os.Getenv("CAROOT")
+	if DdevGlobalConfig.MkcertCARoot == "" || (caRootEnv != "" && caRootEnv != DdevGlobalConfig.MkcertCARoot) {
 		DdevGlobalConfig.MkcertCARoot = readCAROOT()
+	}
+	// This is added just so we can see it in global; not checked.
+	// Make sure that LastStartedVersion always has a valid value
+	if DdevGlobalConfig.LastStartedVersion == "" {
+		DdevGlobalConfig.LastStartedVersion = "v0.0"
+	}
+	// If they set the internetdetectiontimeout below default, just reset to default
+	// and ignore the setting.
+	if DdevGlobalConfig.InternetDetectionTimeout < nodeps.InternetDetectionTimeoutDefault {
+		DdevGlobalConfig.InternetDetectionTimeout = nodeps.InternetDetectionTimeoutDefault
 	}
 
 	err = ValidateGlobalConfig()
@@ -116,7 +132,6 @@ func ReadGlobalConfig() error {
 
 // WriteGlobalConfig writes the global config into ~/.ddev.
 func WriteGlobalConfig(config GlobalConfig) error {
-	config.APIVersion = version.VERSION
 	err := ValidateGlobalConfig()
 	if err != nil {
 		return err
@@ -134,6 +149,26 @@ func WriteGlobalConfig(config GlobalConfig) error {
 # and you can opt in or out of sending instrumentation the ddev developers with
 # instrumentation_opt_in: true # or false
 #
+# You can enable nfs mounting for all projects with
+# nfs_mount_enabled: true
+#
+# You can inject environment variables into the web container with:
+# web_environment: 
+# - SOMEENV=somevalue
+# - SOMEOTHERENV=someothervalue
+
+# In unusual cases the default value to wait to detect internet availability is too short.
+# You can adjust this value higher to make it less likely that ddev will declare internet
+# unavailable, but ddev may wait longer on some commands. This should not be set below the default 750
+# ddev will ignore low values, as they're not useful
+# internet_detection_timeout_ms: 750
+
+# You can enable 'ddev start' to be interrupted by a failing hook with
+# fail_on_hook_fail: true
+
+# disable_http2: false
+# Disable http2 on ddev-router if true
+
 # instrumentation_user: <your_username> # can be used to give ddev specific info about who you are
 # developer_mode: true # (defaults to false) is not used widely at this time.
 # router_bind_all_interfaces: false  # (defaults to false)
@@ -142,6 +177,40 @@ func WriteGlobalConfig(config GlobalConfig) error {
 #    access those ports. Note that this exposes the PHPMyAdmin and MailHog ports as well, which
 #    can be a major security issue, so choose wisely. Consider omit_containers[dba] to avoid
 #    exposing PHPMyAdmin.
+
+# use_hardened_images: false
+# With hardened images a container that is exposed to the internet is
+# a harder target, although not as hard as a fully-secured host.
+# sudo is removed, mailhog is removed, and since the web container
+# is run only as the owning user, only project files might be changed
+# if a CMS or PHP bug allowed creating or altering files, and
+# permissions should not allow escalation.
+
+# Let's Encrypt:
+# This integration is entirely experimental; your mileage may vary.
+# * Your host must be directly internet-connected.
+# * DNS for the hostname must be set to point to the host in question
+# * You must have router_bind_all_interfaces: true or else the Let's Encrypt certbot
+#   process will not be able to process the IP address of the host (and nobody will be able to access your site)
+# * You will need to add a startup script to start your sites after a host reboot.
+# * If using several sites at a single top-level domain, you'll probably want to set
+#   project_tld to that top-level domain. Otherwise, you can use additional-hostnames or
+#   additional_fqdns.
+#
+# use_letsencrypt: false
+# (Experimental, only useful on an internet-based server)
+# Set to true if certificates are to be obtained via certbot on https://letsencrypt.org/
+
+# letsencrypt_email: <email>
+# Email to be used for experimental letsencrypt certificates
+
+# auto_restart_containers: false
+# Experimental
+# If true, attempt to automatically restart projects/containers after reboot or docker restart.
+
+# fail_on_hook_fail: false
+# Decide whether 'ddev start' should be interrupted by a failing hook
+
 `
 	cfgbytes = append(cfgbytes, instructions...)
 
@@ -159,7 +228,7 @@ func GetGlobalDdevDir() string {
 	if err != nil {
 		logrus.Fatal("could not get home directory for current user. is it set?")
 	}
-	ddevDir := path.Join(userHome, ".ddev")
+	ddevDir := filepath.Join(userHome, ".ddev")
 
 	// Create the directory if it is not already present.
 	if _, err := os.Stat(ddevDir); os.IsNotExist(err) {
@@ -203,7 +272,7 @@ func GetValidOmitContainers() []string {
 	return s
 }
 
-// HostPortIsAllocated returns the project name that has allocated
+// HostPostIsAllocated returns the project name that has allocated
 // the port, or empty string.
 func HostPostIsAllocated(port string) string {
 	for project, item := range DdevGlobalConfig.ProjectList {
@@ -214,7 +283,7 @@ func HostPostIsAllocated(port string) string {
 	return ""
 }
 
-// Check GlobalDdev UsedHostPorts to see if requested ports are available.
+// CheckHostPortsAvailable checks GlobalDdev UsedHostPorts to see if requested ports are available.
 func CheckHostPortsAvailable(projectName string, ports []string) error {
 	for _, port := range ports {
 		allocatedProject := HostPostIsAllocated(port)
@@ -262,7 +331,7 @@ func GetFreePort(localIPAddr string) (string, error) {
 
 }
 
-// ReservePorts() adds the ProjectInfo if necessary and assigns the reserved ports
+// ReservePorts adds the ProjectInfo if necessary and assigns the reserved ports
 func ReservePorts(projectName string, ports []string) error {
 	// If the project doesn't exist, add it.
 	_, ok := DdevGlobalConfig.ProjectList[projectName]
@@ -274,7 +343,7 @@ func ReservePorts(projectName string, ports []string) error {
 	return err
 }
 
-// SetProjectAppRoot() sets the approot in the ProjectInfo of global config
+// SetProjectAppRoot sets the approot in the ProjectInfo of global config
 func SetProjectAppRoot(projectName string, appRoot string) error {
 	// If the project doesn't exist, add it.
 	_, ok := DdevGlobalConfig.ProjectList[projectName]
@@ -286,7 +355,7 @@ func SetProjectAppRoot(projectName string, appRoot string) error {
 		return fmt.Errorf("project %s project root %s does not exist", projectName, appRoot)
 	}
 	if DdevGlobalConfig.ProjectList[projectName].AppRoot != "" && DdevGlobalConfig.ProjectList[projectName].AppRoot != appRoot {
-		return fmt.Errorf("project %s project root is already set to %s, refusing to change it to %s; you can `ddev rm --unlist` and start again if the listed project root is in error", projectName, DdevGlobalConfig.ProjectList[projectName].AppRoot, appRoot)
+		return fmt.Errorf("project %s project root is already set to %s, refusing to change it to %s; you can `ddev stop --unlist %s` and start again if the listed project root is in error", projectName, DdevGlobalConfig.ProjectList[projectName].AppRoot, appRoot, projectName)
 	}
 	DdevGlobalConfig.ProjectList[projectName].AppRoot = appRoot
 	err := WriteGlobalConfig(DdevGlobalConfig)
@@ -303,7 +372,7 @@ func GetProject(projectName string) *ProjectInfo {
 	return project
 }
 
-// RemoveProjectInfo() removes the ProjectInfo line for a project
+// RemoveProjectInfo removes the ProjectInfo line for a project
 func RemoveProjectInfo(projectName string) error {
 	_, ok := DdevGlobalConfig.ProjectList[projectName]
 	if ok {
@@ -316,12 +385,12 @@ func RemoveProjectInfo(projectName string) error {
 	return nil
 }
 
-// GetGlobalProjectList() returns the global project list map
+// GetGlobalProjectList returns the global project list map
 func GetGlobalProjectList() map[string]*ProjectInfo {
 	return DdevGlobalConfig.ProjectList
 }
 
-// GetCAROOT() is just a wrapper on global config
+// GetCAROOT is just a wrapper on global config
 func GetCAROOT() string {
 	return DdevGlobalConfig.MkcertCARoot
 }
@@ -370,4 +439,50 @@ func fileExists(name string) bool {
 		}
 	}
 	return true
+}
+
+// IsInternetActiveAlreadyChecked just flags whether it's been checked
+var IsInternetActiveAlreadyChecked = false
+
+// IsInternetActiveResult is the result of the check
+var IsInternetActiveResult = false
+
+// IsInternetActiveNetResolver wraps the standard DNS resolver.
+// In order to override net.DefaultResolver with a stub, we have to define an
+// interface on our own since there is none from the standard library.
+var IsInternetActiveNetResolver interface {
+	LookupHost(ctx context.Context, host string) (addrs []string, err error)
+} = net.DefaultResolver
+
+//IsInternetActive checks to see if we have a viable
+// internet connection. It just tries a quick DNS query.
+// This requires that the named record be query-able.
+// This check will only be made once per command run.
+func IsInternetActive() bool {
+	// if this was already checked, return the result
+	if IsInternetActiveAlreadyChecked {
+		return IsInternetActiveResult
+	}
+
+	timeout := time.Duration(DdevGlobalConfig.InternetDetectionTimeout) * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	randomURL := nodeps.RandomString(10) + ".ddev.site"
+	addrs, err := IsInternetActiveNetResolver.LookupHost(ctx, randomURL)
+
+	// Internet is active (active == true) if both err and ctx.Err() were nil
+	active := err == nil && ctx.Err() == nil
+	if os.Getenv("DDEV_DEBUG") != "" {
+		if active == false {
+			output.UserErr.Println("Internet connection not detected, DNS may not work, see https://ddev.readthedocs.io/en/stable/users/faq/ for info.")
+		}
+		output.UserErr.Printf("IsInternetActive DEBUG: err=%v ctx.Err()=%v addrs=%v IsInternetactive==%v, randomURL=%v internet_detection_timeout_ms=%dms\n", err, ctx.Err(), addrs, active, randomURL, DdevGlobalConfig.InternetDetectionTimeout)
+	}
+
+	// remember the result to not call this twice
+	IsInternetActiveAlreadyChecked = true
+	IsInternetActiveResult = active
+
+	return active
 }

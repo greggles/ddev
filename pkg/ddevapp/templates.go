@@ -1,7 +1,7 @@
 package ddevapp
 
-// DDevComposeTemplate is used to create the main docker-compose.yaml
-// file for a ddev site.
+// DDevComposeTemplate is used to create the main docker-compose file
+// file for a ddev project.
 const DDevComposeTemplate = `version: '{{ .ComposeVersion }}'
 {{ .DdevGenerated }}
 services:
@@ -28,7 +28,7 @@ services:
         source: "."
         target: "/mnt/ddev_config"
       - ddev-global-cache:/mnt/ddev-global-cache
-    restart: "no"
+    restart: "{{ if .AutoRestartContainers }}always{{ else }}no{{ end }}"
     user: "$DDEV_UID:$DDEV_GID"
     hostname: {{ .Name }}-db
     ports:
@@ -39,15 +39,26 @@ services:
       com.ddev.app-type: {{ .AppType }}
       com.ddev.approot: $DDEV_APPROOT
     environment:
-      - COLUMNS=$COLUMNS
-      - LINES=$LINES
+      - COLUMNS
+      - DDEV_HOSTNAME
+      - DDEV_PHP_VERSION
+      - DDEV_PRIMARY_URL
+      - DDEV_PROJECT
+      - DDEV_PROJECT_TYPE
+      - DDEV_ROUTER_HTTP_PORT
+      - DDEV_ROUTER_HTTPS_PORT
+      - DDEV_SITENAME
+      - DDEV_TLD
+      - DOCKER_IP={{ .DockerIP }}
+      - HOST_DOCKER_INTERNAL_IP={{ .HostDockerInternalIP }}
+      - IS_DDEV_PROJECT=true
+      - LINES
       - TZ={{ .Timezone }}
-      - DDEV_PROJECT={{ .Name }}
     command: "$DDEV_MARIADB_LOCAL_COMMAND"
     healthcheck:
       interval: 1s
-      retries: 30
-      start_period: 20s
+      retries: 120
+      start_period: 120s
       timeout: 120s
 {{end}}
   web:
@@ -64,6 +75,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
+      {{ if not .NoProjectMount }}
       - type: {{ .MountType }}
         source: {{ .WebMount }}
         target: /var/www/html
@@ -73,13 +85,16 @@ services:
         {{ else }}
         consistency: cached
         {{ end }}
+      {{ end }}
       - ".:/mnt/ddev_config:ro"
+      - "./nginx_full:/etc/nginx/sites-enabled:ro"
+      - "./apache:/etc/apache2/sites-enabled:ro"
       - ddev-global-cache:/mnt/ddev-global-cache
       {{ if not .OmitSSHAgent }}
       - ddev-ssh-agent_socket_dir:/home/.ssh-agent
       {{ end }}
 
-    restart: "no"
+    restart: "{{ if .AutoRestartContainers }}always{{ else }}no{{ end }}"
     user: "$DDEV_UID:$DDEV_GID"
     hostname: {{ .Name }}-web
     {{if not .OmitDB }}
@@ -91,29 +106,41 @@ services:
       - "{{ .DockerIP }}:$DDEV_HOST_WEBSERVER_PORT:80"
       - "{{ .DockerIP }}:$DDEV_HOST_HTTPS_PORT:443"
     environment:
-      - DOCROOT=$DDEV_DOCROOT
-      - DDEV_PHP_VERSION=$DDEV_PHP_VERSION
-      - DDEV_WEBSERVER_TYPE=$DDEV_WEBSERVER_TYPE
-      - DDEV_PROJECT_TYPE=$DDEV_PROJECT_TYPE
-      - DDEV_ROUTER_HTTP_PORT=$DDEV_ROUTER_HTTP_PORT
-      - DDEV_ROUTER_HTTPS_PORT=$DDEV_ROUTER_HTTPS_PORT
-      - DDEV_XDEBUG_ENABLED=$DDEV_XDEBUG_ENABLED
-      - IS_DDEV_PROJECT=true
+      - COLUMNS
+      - DOCROOT=${DDEV_DOCROOT}
+      - DDEV_DOCROOT
+      - DDEV_HOSTNAME
+      - DDEV_PHP_VERSION
+      - DDEV_PRIMARY_URL
+      - DDEV_PROJECT
+      - DDEV_PROJECT_TYPE
+      - DDEV_ROUTER_HTTP_PORT
+      - DDEV_ROUTER_HTTPS_PORT
+      - DDEV_SITENAME
+      - DDEV_TLD
+      - DDEV_FILES_DIR
+      - DDEV_WEBSERVER_TYPE
+      - DDEV_XDEBUG_ENABLED
+      - DEPLOY_NAME=local
+{{ if not .DisableSettingsManagement }}
+      - DRUSH_OPTIONS_URI=$DDEV_PRIMARY_URL
+{{ end }}
+      - DRUSH_ALLOW_XDEBUG=1
       - DOCKER_IP={{ .DockerIP }}
       - HOST_DOCKER_INTERNAL_IP={{ .HostDockerInternalIP }}
-      - DEPLOY_NAME=local
-      - VIRTUAL_HOST=$DDEV_HOSTNAME
-      - COLUMNS=$COLUMNS
-      - LINES=$LINES
-      - TZ={{ .Timezone }}
       # HTTP_EXPOSE allows for ports accepting HTTP traffic to be accessible from <site>.ddev.site:<port>
       # To expose a container port to a different host port, define the port as hostPort:containerPort
       - HTTP_EXPOSE=${DDEV_ROUTER_HTTP_PORT}:80,${DDEV_MAILHOG_PORT}:{{ .MailhogPort }}
       # You can optionally expose an HTTPS port option for any ports defined in HTTP_EXPOSE.
       # To expose an HTTPS port, define the port as securePort:containerPort.
-      - HTTPS_EXPOSE=${DDEV_ROUTER_HTTPS_PORT}:80
+      - HTTPS_EXPOSE=${DDEV_ROUTER_HTTPS_PORT}:80,${DDEV_MAILHOG_HTTPS_PORT}:{{ .MailhogPort }}
+      - IS_DDEV_PROJECT=true
+      - LINES
       - SSH_AUTH_SOCK=/home/.ssh-agent/socket
-      - DDEV_PROJECT={{ .Name }}
+      - TZ={{ .Timezone }}
+      - VIRTUAL_HOST=${DDEV_HOSTNAME}
+      {{ range $env := .WebEnvironment }}- "{{ $env }}"
+      {{ end }}
     labels:
       com.ddev.site-name: ${DDEV_SITENAME}
       com.ddev.platform: {{ .Plugin }}
@@ -127,15 +154,15 @@ services:
     {{ end }}
     healthcheck:
       interval: 1s
-      retries: 10
-      start_period: 10s
+      retries: 120
+      start_period: 120s
       timeout: 120s
 
 {{ if not .OmitDBA }}
   dba:
     container_name: ddev-${DDEV_SITENAME}-dba
     image: $DDEV_DBAIMAGE
-    restart: "no"
+    restart: "{{ if .AutoRestartContainers }}always{{ else }}no{{ end }}"
     labels:
       com.ddev.site-name: ${DDEV_SITENAME}
       com.ddev.platform: {{ .Plugin }}
@@ -147,12 +174,14 @@ services:
       - "80"
     hostname: {{ .Name }}-dba
     environment:
-      - PMA_USER=db
-      - PMA_PASSWORD=db
+      - PMA_USER=root
+      - PMA_PASSWORD=root
       - VIRTUAL_HOST=$DDEV_HOSTNAME
+      - UPLOAD_LIMIT=1024M
       - TZ={{ .Timezone }}
       # HTTP_EXPOSE allows for ports accepting HTTP traffic to be accessible from <site>.ddev.site:<port>
       - HTTP_EXPOSE=${DDEV_PHPMYADMIN_PORT}:{{ .DBAPort }}
+      - HTTPS_EXPOSE=${DDEV_PHPMYADMIN_HTTPS_PORT}:{{ .DBAPort }}
     healthcheck:
       interval: 120s
       timeout: 2s
@@ -174,7 +203,7 @@ volumes:
   ddev-global-cache:
     name: ddev-global-cache
 
-  {{ if .NFSMountEnabled }}
+  {{ if and .NFSMountEnabled (not .NoProjectMount) }}
   nfsmount:
     driver: local
     driver_opts:
@@ -196,7 +225,7 @@ const ConfigInstructions = `
 
 # docroot: <relative_path> # Relative path to the directory containing index.php.
 
-# php_version: "7.3"  # PHP version to use, "5.6", "7.0", "7.1", "7.2", "7.3", "7.4"
+# php_version: "7.4"  # PHP version to use, "5.6", "7.0", "7.1", "7.2", "7.3", "7.4" "8.0"
 
 # You can explicitly specify the webimage, dbimage, dbaimage lines but this
 # is not recommended, as the images are often closely tied to ddev's' behavior,
@@ -217,16 +246,23 @@ const ConfigInstructions = `
 
 # xdebug_enabled: false  # Set to true to enable xdebug and "ddev start" or "ddev restart"
 # Note that for most people the commands
-# "ddev exec enable_xdebug" and "ddev exec disable_xdebug" work better,
+# "ddev xdebug" to enable xdebug and "ddev xdebug off" to disable it work better,
 # as leaving xdebug enabled all the time is a big performance hit.
 
-# webserver_type: nginx-fpm  # Can be set to apache-fpm or apache-cgi as well
+# webserver_type: nginx-fpm  # or apache-fpm
 
 # timezone: Europe/Berlin
 # This is the timezone used in the containers and by PHP;
 # it can be set to any valid timezone,
 # see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 # For example Europe/Dublin or MST7MDT
+
+# composer_version: ""
+# if composer_version:"" it will use the current ddev default composer release.
+# It can also be set to "1", to get most recent composer v1
+# or "2" for most recent composer v2.
+# It can be set to any existing specific composer version.
+# After first project 'ddev start' this will not be updated until it changes
 
 # additional_hostnames:
 #  - somename
@@ -250,15 +286,18 @@ const ConfigInstructions = `
 # These values specify the destination directory for ddev ssh and the
 # directory in which commands passed into ddev exec are run.
 
-# omit_containers: ["dba", "ddev-ssh-agent"]
-# would omit the dba (phpMyAdmin) and ddev-ssh-agent containers. Currently
-# only those two containers can be omitted here.
-# Note that these containers can also be omitted globally in the
-# ~/.ddev/global_config.yaml or with the "ddev config global" command.
+# omit_containers: [db, dba, ddev-ssh-agent]
+# Currently only these containers are supported. Some containers can also be
+# omitted globally in the ~/.ddev/global_config.yaml. Note that if you omit
+# the "db" container, several standard features of ddev that access the
+# database container will be unusable.
 
 # nfs_mount_enabled: false
 # Great performance improvement but requires host configuration first.
 # See https://ddev.readthedocs.io/en/stable/users/performance/#using-nfs-to-mount-the-project-into-the-container
+
+# fail_on_hook_fail: False
+# Decide whether 'ddev start' should be interrupted by a failing hook
 
 # host_https_port: "59002"
 # The host port binding for https can be explicitly specified. It is
@@ -276,13 +315,15 @@ const ConfigInstructions = `
 # The host port binding for the ddev-dbserver can be explicitly specified. It is dynamic
 # unless explicitly specified.
 
-# phpmyadmin_port: "1000"
-# The PHPMyAdmin port can be changed from the default 8036
+# phpmyadmin_port: "8036"
+# phpmyadmin_https_port: "8037"
+# The PHPMyAdmin ports can be changed from the default 8036 and 8037
 
-# mailhog_port: "1001"
-# The MailHog port can be changed from the default 8025
+# mailhog_port: "8025"
+# mailhog_https_port: "8026"
+# The MailHog ports can be changed from the default 8025 and 8026
 
-# webimage_extra_packages: [php-yaml, php7.3-ldap]
+# webimage_extra_packages: [php7.4-tidy, php-bcmath]
 # Extra Debian packages that are needed in the webimage can be added here
 
 # dbimage_extra_packages: [telnet,netcat]
@@ -306,11 +347,20 @@ const ConfigInstructions = `
 
 # disable_settings_management: false
 # If true, ddev will not create CMS-specific settings files like
-# Drupal's settings.php/settings.ddev.php or TYPO3's AdditionalSettings.php
+# Drupal's settings.php/settings.ddev.php or TYPO3's AdditionalConfiguration.php
 # In this case the user must provide all such settings.
 
-# provider: default # Currently either "default" or "pantheon"
-#
+# You can inject environment variables into the web container with:
+# web_environment: 
+# - SOMEENV=somevalue
+# - SOMEOTHERENV=someothervalue
+
+# no_project_mount: false
+# (Experimental) If true, ddev will not mount the project into the web container;
+# the user is responsible for mounting it manually or via a script.
+# This is to enable experimentation with alternate file mounting strategies.
+# For advanced users only!
+
 # Many ddev commands can be extended to run tasks before or after the
 # ddev command is executed, for example "post-start", "post-import-db",
 # "pre-composer", "post-composer"
@@ -394,20 +444,33 @@ services:
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
       - ddev-global-cache:/mnt/ddev-global-cache:rw
-    restart: "no"
+      {{ if .letsencrypt }}
+      - ddev-router-letsencrypt:/etc/letsencrypt:rw
+      {{ end }}
+    environment:
+      - DISABLE_HTTP2={{ .disable_http2 }}
+{{ if .letsencrypt }}
+      - LETSENCRYPT_EMAIL={{ .letsencrypt_email }}
+      - USE_LETSENCRYPT={{ .letsencrypt }}
+{{ end }}
+    restart: "{{ if .AutoRestartContainers }}always{{ else }}no{{ end }}"
     healthcheck:
       interval: 1s
-      retries: 10
-      start_period: 10s
+      retries: 120
+      start_period: 120s
       timeout: 120s
 
 networks:
-   default:
-     external:
-       name: ddev_default
+  default:
+    external:
+      name: ddev_default
 volumes:
-   ddev-global-cache:
-     name: ddev-global-cache
+  ddev-global-cache:
+    name: ddev-global-cache
+{{ if .letsencrypt }}
+  ddev-router-letsencrypt:
+    name: ddev-router-letsencrypt
+{{ end }}
 `
 
 const DdevSSHAuthTemplate = `version: '{{ .compose_version }}'
@@ -428,7 +491,7 @@ services:
         uid: '{{ .UID }}'
         gid: '{{ .GID }}'
     image: {{ .ssh_auth_image }}:{{ .ssh_auth_tag }}-built
-
+    restart: "{{ if .AutoRestartContainers }}always{{ else }}no{{ end }}"
     user: "$DDEV_UID:$DDEV_GID"
     volumes:
       - "dot_ssh:/tmp/.ssh"

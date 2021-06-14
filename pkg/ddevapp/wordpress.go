@@ -89,6 +89,7 @@ const wordpressSettingsTemplate = `<?php
 /**
  {{ $config.Signature }}: Automatically generated WordPress settings file.
  ddev manages this file and may delete or overwrite the file unless this comment is removed.
+ It is recommended that you leave this file alone.
  */
 
 /** Authentication Unique Keys and Salts. */
@@ -251,6 +252,7 @@ func writeWordpressSettingsFile(wordpressConfig *WordpressConfig, filePath strin
 	}
 	defer util.CheckClose(file)
 
+	//nolint: revive
 	if err = tmpl.Execute(file, wordpressConfig); err != nil {
 		return err
 	}
@@ -295,6 +297,7 @@ func writeWordpressDdevSettingsFile(config *WordpressConfig, filePath string) er
 	}
 	defer util.CheckClose(file)
 
+	//nolint: revive
 	if err = tmpl.Execute(file, config); err != nil {
 		return err
 	}
@@ -366,6 +369,7 @@ func wordpressImportFilesAction(app *DdevApp, importPath, extPath string) error 
 		return nil
 	}
 
+	//nolint: revive
 	if err := fileutil.CopyDir(importPath, destPath); err != nil {
 		return err
 	}
@@ -404,12 +408,4 @@ func wordpressGetRelativeAbsPath(app *DdevApp) (string, error) {
 	absPath := filepath.Base(filepath.Dir(subDirMatches[0]))
 
 	return absPath, nil
-}
-
-// wordpressPostStartAction handles post-start actions
-func wordpressPostStartAction(app *DdevApp) error {
-	if _, err := app.CreateSettingsFile(); err != nil {
-		return fmt.Errorf("failed to write settings file %s: %v", app.SiteDdevSettingsFile, err)
-	}
-	return nil
 }

@@ -1,13 +1,13 @@
 package ddevapp
 
 import (
+	"embed"
 	"fmt"
 	"github.com/drud/ddev/pkg/archive"
 	"github.com/drud/ddev/pkg/fileutil"
 	"github.com/drud/ddev/pkg/nodeps"
 	"github.com/drud/ddev/pkg/output"
 	"github.com/drud/ddev/pkg/util"
-	"github.com/gobuffalo/packr/v2"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -29,6 +29,9 @@ func isMagento2App(app *DdevApp) bool {
 	return false
 }
 
+//go:embed magento_assets
+var magentoConfigAssets embed.FS
+
 // createMagentoSettingsFile manages creation and modification of local.xml.
 func createMagentoSettingsFile(app *DdevApp) (string, error) {
 
@@ -47,8 +50,7 @@ func createMagentoSettingsFile(app *DdevApp) (string, error) {
 	} else {
 		output.UserOut.Printf("No %s file exists, creating one", app.SiteSettingsPath)
 
-		box := packr.New("magento_packr_assets", "./magento_packr_assets")
-		content, err := box.Find("local.xml")
+		content, err := magentoConfigAssets.ReadFile("magento_assets/local.xml")
 		if err != nil {
 			return "", err
 		}
@@ -104,6 +106,7 @@ func magentoImportFilesAction(app *DdevApp, importPath, extPath string) error {
 		return nil
 	}
 
+	//nolint: revive
 	if err := fileutil.CopyDir(importPath, destPath); err != nil {
 		return err
 	}
@@ -147,8 +150,7 @@ func createMagento2SettingsFile(app *DdevApp) (string, error) {
 	} else {
 		output.UserOut.Printf("No %s file exists, creating one", app.SiteSettingsPath)
 
-		box := packr.New("magento_packr_assets", "./magento_packr_assets")
-		content, err := box.Find("env.php")
+		content, err := magentoConfigAssets.ReadFile("magento_assets/env.php")
 		if err != nil {
 			return "", err
 		}
@@ -164,13 +166,6 @@ func createMagento2SettingsFile(app *DdevApp) (string, error) {
 // setMagento2SiteSettingsPaths sets the paths to settings.php for templating.
 func setMagento2SiteSettingsPaths(app *DdevApp) {
 	app.SiteSettingsPath = filepath.Join(app.AppRoot, "app", "etc", "env.php")
-}
-
-// magento2ConfigOverrideAction overrides php_version for magento2, since it is incompatible
-// with php7.3+
-func magento2ConfigOverrideAction(app *DdevApp) error {
-	app.PHPVersion = nodeps.PHP72
-	return nil
 }
 
 // magentoConfigOverrideAction overrides php_version for magento2, since it is incompatible
